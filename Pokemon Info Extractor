@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokéFarm Q Pokémon Info Extractor
 // @namespace    http://tampermonkey.net/
-// @version      1.6.1
+// @version      1.6.2
 // @description  Extract Pokémon info from tooltips (First form species, gender, nature, and forme.)
 // @match        *://pokefarm.com/*
 // @grant        none
@@ -10,12 +10,12 @@
 (function() {
     'use strict';
 
-        const evolutionMapping = {
-// Sorted according to the Pokefarm Q Pokedex order.
-// KANTO
-    'Bulbasaur': ['Bulbasaur', 'Ivysaur', 'Venusaur'],
-    'Charmander': ['Charmander', 'Charmeleon', 'Charizard'],
-    'Squirtle': ['Squirtle', 'Wartortle', 'Blastoise'],
+    const evolutionMapping = {
+        // Sorted according to the Pokefarm Q Pokedex order.
+        // KANTO
+        'Bulbasaur': ['Bulbasaur', 'Ivysaur', 'Venusaur'],
+        'Charmander': ['Charmander', 'Charmeleon', 'Charizard'],
+        'Squirtle': ['Squirtle', 'Wartortle', 'Blastoise'],
     'Caterpie': ['Caterpie', 'Metapod', 'Butterfree'],
     'Weedle': ['Weedle', 'Kakuna', 'Beedrill'],
     'Pidgey': ['Pidgey', 'Pidgeotto', 'Pidgeot'],
@@ -546,7 +546,9 @@
     "Snow Combee": ["Snow Combee"],
     "Snowpoke": ["Snowpoke", "Snowbro", "Snowking"],
     "Spritzkrow": ["Spritzkrow", "Aromakrow"],
-    "Teddicursa": ["Teddicursa", "Cursaring"]
+    "Teddicursa": ["Teddicursa", "Cursaring"],
+    "Ruffwool": ["Ruffwool", "Lycanwool"]
+
     };
 
     // Function to trigger the hover event on all Pokémon elements
@@ -585,8 +587,8 @@
         let linkElement = tooltipElement.querySelector('a');
         let link = linkElement ? linkElement.href : null;
 
-        // Ignore forme for Toxel
-        if (species === 'Toxel') {
+        // Ignore forme for Toxel and Lycanwool
+        if (species === 'Toxel' || species === 'Lycanwool') {
             forme = null;
         }
 
@@ -600,8 +602,9 @@
         tooltips.forEach(tooltip => {
             let info = getInfoFromTooltip(tooltip);
             if (info.species && evolutionMapping[info.species]) {
-                let baseForm = evolutionMapping[info.species];
-                console.log(`Species: ${baseForm}, Gender: ${info.gender || 'N/A'}, Nature: ${info.nature || 'N/A'}, Forme: ${info.forme || 'N/A'}, Link: ${info.link || 'No link'}`);
+                // Get base species from the evolution mapping
+                let baseSpecies = evolutionMapping[info.species][0];
+                console.log(`Species: ${baseSpecies}, Gender: ${info.gender || 'N/A'}, Nature: ${info.nature || 'N/A'}, Forme: ${info.forme || 'N/A'}, Link: ${info.link || 'No link'}`);
             }
         });
     }
