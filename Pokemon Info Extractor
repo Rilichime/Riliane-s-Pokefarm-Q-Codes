@@ -13,9 +13,9 @@
     const evolutionMapping = {
         // Sorted according to the Pokefarm Q Pokedex order.
         // KANTO
-        'Bulbasaur': ['Bulbasaur', 'Ivysaur', 'Venusaur'],
-        'Charmander': ['Charmander', 'Charmeleon', 'Charizard'],
-        'Squirtle': ['Squirtle', 'Wartortle', 'Blastoise'],
+    'Bulbasaur': ['Bulbasaur', 'Ivysaur', 'Venusaur'],
+    'Charmander': ['Charmander', 'Charmeleon', 'Charizard'],
+    'Squirtle': ['Squirtle', 'Wartortle', 'Blastoise'],
     'Caterpie': ['Caterpie', 'Metapod', 'Butterfree'],
     'Weedle': ['Weedle', 'Kakuna', 'Beedrill'],
     'Pidgey': ['Pidgey', 'Pidgeotto', 'Pidgeot'],
