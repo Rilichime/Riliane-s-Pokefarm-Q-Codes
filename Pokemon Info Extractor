@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         PokéFarm Q Pokémon Info Extractor
 // @namespace    http://tampermonkey.net/
-// @version      1.6.2
+// @version      1.6.3
+// @author       Riliane
 // @description  Extract Pokémon info from tooltips (First form species, gender, nature, and forme.)
 // @match        *://pokefarm.com/*
 // @grant        none
