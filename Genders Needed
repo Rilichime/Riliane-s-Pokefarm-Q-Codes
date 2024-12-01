@@ -1,0 +1,99 @@
+<div>
+    <!-- Textarea for user input -->
+    <textarea id="pokemonInput" rows="10" style="width: 99%; padding: 5px; margin: 5px; color: #505050; background-color: white; border: none; font-family: 'Comic Sans MS', sans-serif;" placeholder="Paste your Pokémon list here..."></textarea>
+    <br>
+    
+    <!-- Input fields for male and female thresholds -->
+    <label for="maleThreshold" style="padding: 5px; margin: 5px; margin-right: 0px; color: #0b5394; font-family: 'Comic Sans MS', sans-serif;">♂:</label>
+    <input type="number" id="maleThreshold" value="7" min="0" style="width: 50px; padding: 5px; margin: 5px; color: #505050; background-color: white; border: none; font-family: 'Comic Sans MS', sans-serif;">
+    
+    <label for="femaleThreshold" style="padding: 5px; margin: 5px; margin-right: 0px; color: #990000; font-family: 'Comic Sans MS', sans-serif;">♀:</label>
+    <input type="number" id="femaleThreshold" value="7" min="0" style="width: 50px; padding: 5px; margin: 5px; color: #505050; background-color: white; border: none; font-family: 'Comic Sans MS', sans-serif;">
+    <br>
+    
+    <!-- Button to start the processing -->
+    <button id="processBtn" style="padding: 5px; margin: 5px; color: #505050; background-color: white; border: none; font-family: 'Comic Sans MS', sans-serif;">Process List</button>
+    <br>
+    
+    <!-- Results will be displayed here -->
+    <div id="results" style="padding: 5px; margin: 5px; color: #505050; background-color: white; border: none; font-family: 'Comic Sans MS', sans-serif;"></div>
+</div>
+
+<script>
+// Function to process the input in batches
+function processBatch(startIndex, pokemonList, counts, callback) {
+    const batch = pokemonList.slice(startIndex, startIndex + 100);
+    batch.forEach(item => {
+        if (item.gender !== 'N/A') {  // Skip N/A gender entries
+            const key = `${item.species}-${item.forme}-${item.gender}`;
+            if (!counts[key]) {
+                counts[key] = 0;
+            }
+            counts[key]++;
+        }
+    });
+    if (startIndex + 100 < pokemonList.length) {
+        setTimeout(() => processBatch(startIndex + 100, pokemonList, counts, callback), 100);
+    } else {
+        callback();
+    }
+}
+
+// Function to check counts and display results for species/gender below thresholds
+function checkCounts(counts) {
+    const maleThreshold = parseInt(document.getElementById("maleThreshold").value, 10);
+    const femaleThreshold = parseInt(document.getElementById("femaleThreshold").value, 10);
+    const speciesGenderNeeds = {};
+    let output = "";
+
+    for (const key in counts) {
+        const [species, forme, gender] = key.split('-');
+        const genderKey = `${species}-${forme}`;
+
+        if (!speciesGenderNeeds[genderKey]) {
+            speciesGenderNeeds[genderKey] = { M: 0, F: 0 };
+        }
+        speciesGenderNeeds[genderKey][gender] += counts[key];
+    }
+
+    for (const key in speciesGenderNeeds) {
+        const [species, forme] = key.split("-");
+        const { M, F } = speciesGenderNeeds[key];
+        const needsMale = maleThreshold - M;
+        const needsFemale = femaleThreshold - F;
+
+        let baseObject = `{ species: '${species}'`;
+        if (forme !== 'N/A') {
+            baseObject += `, forme: '${forme}'`;
+        }
+        if (needsMale > 0 && needsFemale > 0) {
+            output += `${baseObject} }, // need ${needsMale} male, ${needsFemale} female<br>`;
+        } else if (needsMale > 0) {
+            output += `${baseObject}, gender: 'M' }, // need ${needsMale} male<br>`;
+        } else if (needsFemale > 0) {
+            output += `${baseObject}, gender: 'F' }, // need ${needsFemale} female<br>`;
+        }
+    }
+    document.getElementById("results").innerHTML = output || "All species meet the thresholds.";
+}
+
+// Function to parse the user's input and start processing
+function processPokemonList() {
+    const inputText = document.getElementById("pokemonInput").value;
+    const pokemonList = inputText.trim().split("\n").map(line => {
+        const [speciesPart, genderPart, naturePart, formePart, linkPart] = line.split(", ");
+        return {
+            species: speciesPart.replace("Species: ", "").trim(),
+            gender: genderPart.replace("Gender: ", "").trim().toUpperCase(),
+            nature: naturePart ? naturePart.replace("Nature: ", "").trim() : "",
+            forme: formePart ? formePart.replace("Forme: ", "").trim() : "N/A",
+            link: linkPart ? linkPart.replace("Link: ", "").trim() : ""
+        };
+    });
+    const counts = {};
+    processBatch(0, pokemonList, counts, () => checkCounts(counts));
+}
+
+// Set up the button click event to process the list
+document.getElementById("processBtn").addEventListener("click", processPokemonList);
+</script>
