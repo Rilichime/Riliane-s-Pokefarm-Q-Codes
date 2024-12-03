@@ -1,0 +1,97 @@
+<div>
+    <h3>Part A Pokémon</h3>
+    <label for="inputA">Enter details (multiple Pokémon):</label><br>
+    <textarea id="inputA" rows="5" cols="50" placeholder="Species: Vulpix, Gender: F, Nature: Docile, Forme: Alolan, Link: https://example.com"></textarea><br>
+</div>
+
+<div>
+    <h3>Part B Pokémon</h3>
+    <label for="inputB">Enter details (multiple Pokémon):</label><br>
+    <textarea id="inputB" rows="5" cols="50" placeholder="Species: Vulpix, Gender: M, Nature: Docile, Forme: Alolan, Link: https://example.com"></textarea><br>
+</div>
+
+<button onclick="matchMultiplePokemon()">Check Matches</button>
+
+<p id="result"></p>
+
+<script>
+function parseInput(input) {
+    return input.trim().split('\n').map(line => {
+        const details = line.match(/Species:\s*([^,]+),\s*Gender:\s*([^,]+),\s*Nature:\s*([^,]+),?\s*(Forme:\s*([^,]+))?,?\s*Link:\s*(https?:\/\/[^\s]+)/i);
+        
+        if (!details) {
+            return null;
+        }
+
+        return {
+            species: details[1].trim().toLowerCase(),
+            gender: details[2].trim(),
+            nature: details[3].trim().toLowerCase(),
+            forme: details[5] ? details[5].trim().toLowerCase() : "",
+            link: details[6].trim()
+        };
+    }).filter(pokemon => pokemon !== null);
+}
+
+function processInChunks(pokemonListA, pokemonListB, chunkSize, callback) {
+    let indexA = 0;
+    const removedA = [];
+    const removedB = [];
+
+    function processChunk() {
+        let resultText = '';
+        let limitA = Math.min(indexA + chunkSize, pokemonListA.length);
+
+        for (let i = indexA; i < limitA; i++) {
+            const pokemonA = pokemonListA[i];
+
+            for (let j = 0; j < pokemonListB.length; j++) {
+                const pokemonB = pokemonListB[j];
+
+                // Updated gender matching condition: F to M and N/A to N/A
+                const genderMatch = (pokemonA.gender === 'F' && pokemonB.gender === 'M') ||
+                                    (pokemonA.gender === 'M' && pokemonB.gender === 'F') ||
+                                    (pokemonA.gender === 'N/A' && pokemonB.gender === 'N/A');
+
+                if (pokemonA.species === pokemonB.species 
+                    && pokemonA.nature === pokemonB.nature 
+                    && pokemonA.forme === pokemonB.forme
+                    && genderMatch) {
+                    
+                    resultText += `Match found for Species: ${pokemonA.species}, Nature: ${pokemonA.nature}, Forme: ${pokemonA.forme}.<br>`;
+
+                    // Include links for both matching Pokémon
+                    resultText += `Link to Part A Pokémon: <a href="${pokemonA.link}" target="_blank">${pokemonA.link}</a><br>`;
+                    resultText += `Link to Part B Pokémon: <a href="${pokemonB.link}" target="_blank">${pokemonB.link}</a><br>`;
+
+                    removedA.push(i);
+                    removedB.push(j);
+                    break;
+                }
+            }
+        }
+
+        callback(resultText);
+
+        indexA += chunkSize;
+        if (indexA < pokemonListA.length) {
+            setTimeout(processChunk, 0);
+        }
+    }
+
+    processChunk();
+}
+
+function matchMultiplePokemon() {
+    const inputA = document.getElementById("inputA").value;
+    const inputB = document.getElementById("inputB").value;
+
+    const pokemonListA = parseInput(inputA);
+    const pokemonListB = parseInput(inputB);
+
+    document.getElementById("result").innerHTML = "";
+    processInChunks(pokemonListA, pokemonListB, 100, (resultText) => {
+        document.getElementById("result").innerHTML += resultText || "No matches found.";
+    });
+}
+</script>
