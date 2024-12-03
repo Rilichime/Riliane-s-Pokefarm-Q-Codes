@@ -21,7 +21,7 @@ Information will be exported in the following format.
 > Species: Kecleon,  Gender: M,  Nature: Rash,  Forme: N/A,  Link: https://pokefarm.com/summary/Nb94f
 
 ## PFQ Genders Needed
-HTML with CSS, and Javascript. Utilized on my [Wix site](https://digitalxdaydreamz.wixsite.com/rilianepfq/genders-needed)
+HTML with CSS, and Javascript. Utilized on my [Wix site](https://digitalxdaydreamz.wixsite.com/rilianepfq/genders-needed).
 
 Input Pokemon in the following format.
 
@@ -41,7 +41,7 @@ The output format can be directly copy-pasted into the PFQ Console Filter.
 
 ## PFQ Matchmaking
 
-HTML with CSS, and Javascript. [Wix site](https://digitalxdaydreamz.wixsite.com/rilianepfq)
+HTML with CSS, and Javascript. Utilized on my [Wix site](https://digitalxdaydreamz.wixsite.com/rilianepfq).
 
 Input Pokemon in the following format.
 
