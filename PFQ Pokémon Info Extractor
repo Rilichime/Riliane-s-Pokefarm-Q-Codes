@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         PokéFarm Q Pokémon Info Extractor
+// @name         PFQ Pokémon Info Extractor
 // @namespace    http://tampermonkey.net/
 // @version      2.1
 // @description  Extract Pokémon info from tooltips (Base species, gender, nature, and forme.)
