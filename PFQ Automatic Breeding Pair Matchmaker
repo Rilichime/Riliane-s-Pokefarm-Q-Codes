@@ -1,0 +1,194 @@
+// ==UserScript==
+// @name         PFQ Automatic Breeding Pair Matchmaker
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Compare Pokémon in fields and display matches in other people's fields.
+// @match        https://pokefarm.com/fields*
+// @grant        none
+// @icon         https://cdn-icons-png.flaticon.com/128/5091/5091398.png
+
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const STORAGE_KEY = 'pfq_saved_field_pokemon';
+    const isOwnField = window.location.pathname === '/fields';
+
+    const Gender = {
+        Male: "M",
+        Female: "F"
+    };
+
+    // Evolution mapping for Bulbasaur line
+    const EVOLUTION_MAPPING = {
+        Bulbasaur: "Bulbasaur",
+        Ivysaur: "Bulbasaur",
+        Venusaur: "Bulbasaur",
+    };
+
+    function getGender(tooltip) {
+        if (tooltip.querySelector('img[src*="gender_m.png"]')) return Gender.Male;
+        if (tooltip.querySelector('img[src*="gender_f.png"]')) return Gender.Female;
+        return null;
+    }
+
+    function getFieldFromTooltip(tooltip, index) {
+        const node = tooltip.childNodes[index];
+        const text = node?.innerText || node?.textContent || "";
+        const [_, info] = text.split(":");
+        return info?.trim();
+    }
+
+    function extractNature(rawNature) {
+        return rawNature.replace(/\s*\(.*?\)/, '').trim();
+    }
+
+    function getPokemonDataFromTooltip(tooltip) {
+        const species = getFieldFromTooltip(tooltip, 3);
+        const forme = getFieldFromTooltip(tooltip, 4) || null;
+        const natureIndex = forme ? 9 : 8;
+        const nature = extractNature(getFieldFromTooltip(tooltip, natureIndex) || 'N/A');
+        const gender = getGender(tooltip);
+
+        const linkElement = tooltip.querySelector('a');
+        const link = linkElement ? linkElement.href : null;
+
+        return { species, forme, nature, gender, link };
+    }
+
+    // Get base species name (e.g., Venusaur becomes Bulbasaur)
+    function getBaseSpecies(species) {
+        return EVOLUTION_MAPPING[species] || species;
+    }
+
+    function getOppositeGender(gender) {
+        if (gender === Gender.Male) return Gender.Female;
+        if (gender === Gender.Female) return Gender.Male;
+        return null;
+    }
+
+    function matchPokemon(mon, savedList) {
+        const oppositeGender = getOppositeGender(mon.gender);
+        if (!oppositeGender) return null;
+
+        const baseSpecies = getBaseSpecies(mon.species);
+
+        return savedList.find(saved =>
+            getBaseSpecies(saved.species) === baseSpecies &&
+            saved.forme === mon.forme &&
+            saved.nature === mon.nature &&
+            saved.gender === oppositeGender
+        );
+    }
+
+    function triggerTooltips() {
+        const mons = document.querySelectorAll('.pokemon_class');
+        mons.forEach(el => el.dispatchEvent(new Event('mouseover')));
+    }
+
+    function createUI() {
+        let panel = document.getElementById('pfq-match-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'pfq-match-panel';
+            panel.style.position = 'fixed';
+            panel.style.left = '0';
+            panel.style.top = '100px';
+            panel.style.width = '600px';
+            panel.style.height = '600px';
+            panel.style.overflow = 'auto';
+            panel.style.zIndex = '9999';
+            panel.style.background = 'rgba(0,0,0,0.85)';
+            panel.style.color = 'white';
+            panel.style.padding = '10px';
+            panel.style.fontSize = '14px';
+            panel.style.fontFamily = 'sans-serif';
+            panel.style.borderRight = '3px solid #888';
+
+            panel.innerHTML = `
+                <h2 style="margin-top:0;">Matched Pokémon</h2>
+                <div id="pfq-match-content"></div>
+                <hr>
+                <details style="margin-top:10px;">
+                    <summary style="cursor:pointer;font-size:16px;">Show Saved Pokémon</summary>
+                    <div id="pfq-logged-pokemon" style="margin-top:10px;"></div>
+                </details>
+            `;
+            document.body.appendChild(panel);
+        }
+    }
+
+    function updateMatchUI(matches) {
+        const container = document.getElementById('pfq-match-content');
+        if (!container) return;
+
+        container.innerHTML = '';
+
+        if (matches.length === 0) {
+            container.innerHTML = '<p>No matches found.</p>';
+            return;
+        }
+
+        matches.forEach(({ yourMatch, otherFieldMon }, i) => {
+            const entry = document.createElement('div');
+            entry.style.marginBottom = '10px';
+            entry.style.borderBottom = '1px solid #ccc';
+            entry.style.paddingBottom = '6px';
+
+            entry.innerHTML = `
+                <div><strong>${i + 1}.</strong> <span style="color:#90ee90">${yourMatch.species}</span></div>
+                <div><strong>Your Mon:</strong> ${yourMatch.nature} • ${yourMatch.forme || "Default"} • ${yourMatch.gender}</div>
+                <div><strong>Other's Mon:</strong> ${otherFieldMon.nature} • ${otherFieldMon.forme || "Default"} • ${otherFieldMon.gender}</div>
+            `;
+            container.appendChild(entry);
+        });
+    }
+
+    function updateLoggedUI(savedList) {
+        const logContainer = document.getElementById('pfq-logged-pokemon');
+        if (!logContainer) return;
+
+        logContainer.innerHTML = '';
+        savedList.forEach((mon, index) => {
+            const line = document.createElement('div');
+            line.style.marginBottom = '4px';
+
+            line.innerHTML = `Species: ${mon.species}, Gender: ${mon.gender || "N/A"}, Nature: ${mon.nature}, Forme: ${mon.forme || "Default"}, Link: <a href="${mon.link}" target="_blank" style="color:lightblue;">${mon.link}</a>`;
+            logContainer.appendChild(line);
+        });
+    }
+
+    function parseTooltipsAndCompare() {
+        const tooltips = document.querySelectorAll('.fieldmontip');
+        const parsed = [];
+
+        tooltips.forEach(tooltip => {
+            const mon = getPokemonDataFromTooltip(tooltip);
+            if (mon.species) parsed.push(mon);
+        });
+
+        if (isOwnField) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+            updateLoggedUI(parsed);
+            console.log(`[PFQ] Saved ${parsed.length} Pokémon from your field.`);
+        } else {
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            const matches = parsed.map(mon => {
+                const match = matchPokemon(mon, saved);
+                return match ? { yourMatch: match, otherFieldMon: mon } : null;
+            }).filter(Boolean);
+
+            updateMatchUI(matches);
+        }
+    }
+
+    function startComparison() {
+        createUI();
+        triggerTooltips();
+        setTimeout(parseTooltipsAndCompare, 3500);
+    }
+
+    startComparison();
+    setInterval(startComparison, 6000);
+})();
