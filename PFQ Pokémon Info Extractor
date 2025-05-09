@@ -1,25 +1,23 @@
 // ==UserScript==
-// @name         PFQ Pokémon Info Extractor
+// @name         PokéFarm Q Pokémon Info Extractor
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      3.0
 // @description  Extract Pokémon info from tooltips (Base species, gender, nature, and forme.)
 // @match        *://pokefarm.com/*
 // @grant        none
+// @icon         https://cdn-icons-png.flaticon.com/128/1027/1027170.png
 // ==/UserScript==
 
 (function() {
-    'use strict';
+"use strict";
 
-    const CONSTANTS = {
-        ignoredSpecies: ["Toxel", "Ruffwool", "Burmy", "Eiscue", "Cramorant", "Finizen"],
-        querySelectors: {
-            tooltip: ".fieldmontip",
-            pokemon: ".pokemon_class",
-            partyContainer: "div.field_party",
-        },
-    };
+var Gender;
+(function (Gender) {
+    Gender["Male"] = "M";
+    Gender["Female"] = "F";
+})(Gender || (Gender = {}));
 
-    const evolutionMapping = {
+const EVOLUTION_MAPPING = {
     Bulbasaur: "Bulbasaur",
     Ivysaur: "Bulbasaur",
     Venusaur: "Bulbasaur",
@@ -140,8 +138,6 @@
     Horsea: "Horsea",
     Seadra: "Horsea",
     Kingdra: "Horsea",
-    "Mime Jr.": "Mime Jr.",
-    "Mr. Mime": "Mime Jr.",
     Goldeen: "Goldeen",
     Seaking: "Goldeen",
     Scyther: "Scyther",
@@ -401,6 +397,8 @@
     Shieldon: "Shieldon",
     Bastiodon: "Shieldon",
     Burmy: "Burmy",
+    Wormadam: "Burmy",
+    Mothim: "Burmy",
     Combee: "Combee",
     Pachirisu: "Pachirisu",
     Buizel: "Buizel",
@@ -1101,88 +1099,100 @@
     Lycanwool: "Ruffwool",
     Frosdour: "Frosour",
     Chilldoom: "Frosdour",
-    };
+};
 
-    const Gender = {
-        Male: "M",
-        Female: "F"
-    };
+const IGNORED_SPECIES = [
+    "Toxel",
+    "Ruffwool",
+    "Burmy",
+    "Eiscue",
+    "Cramorant",
+    "Finizen",
+];
 
-    const getGender = (element) => {
-        if (element.querySelector('img[src*="gender_m.png"]')) {
-            return Gender.Male;
-        }
-        if (element.querySelector('img[src*="gender_f.png"]')) {
-            return Gender.Female;
-        }
-        return null;
-    };
+const getGender = (element) => {
+    if (element.querySelector('img[src*="gender_m.png"]')) {
+        return Gender.Male;
+    }
+    if (element.querySelector('img[src*="gender_f.png"]')) {
+        return Gender.Female;
+    }
+    return null;
+};
 
-    const getSpecifiedField = (element, elementIndex) => {
-        const childNode = element.childNodes[elementIndex];
-        const text = childNode?.innerText || childNode?.textContent || "";
-        const [_, info] = text.split(":");
-        return info?.trim();
-    };
+const getSpecifiedField = (element, elementIndex) => {
+    const childNode = element.childNodes[elementIndex];
+    const text = childNode.innerText || childNode.textContent;
+    const [_, info] = text.split(":");
+    return info?.trim();
+};
 
-    const extractNature = (natureText) => {
-        return natureText.replace(/\s*\(.*?\)/, '').trim();
-    };
+const getNature = (natureText) => {
+    return natureText ? natureText.replace(/\s*\(.*?\)/, "").trim() : null;
+};
 
-    const getPokemonInfo = (element) => {
-        const species = getSpecifiedField(element, 3);
-        const baseForm = evolutionMapping[species];
-        const forme = species && !CONSTANTS.ignoredSpecies.includes(species)
-            ? getSpecifiedField(element, 4)
-            : null;
-
-        const natureIndex = forme ? 9 : 8;
-        let nature = getSpecifiedField(element, natureIndex);
-        nature = nature ? extractNature(nature) : "N/A";
-
-        const gender = getGender(element);
-        const linkElement = element.querySelector("a");
-        const link = linkElement ? linkElement.href : null;
-        const pokemon = { baseForm, species, nature, forme, gender, link };
-
-        if (pokemon.species && pokemon.baseForm) {
-            console.log(`Species: ${pokemon.baseForm}, `, `Gender: ${pokemon.gender || "N/A"}, `, `Nature: ${pokemon.nature || "N/A"}, `, `Forme: ${pokemon.forme || "N/A"}, `, `Link: ${pokemon.link || "No link"}`);
-            return true;
-        }
-        return false;
-    };
-
-    const triggerTooltips = () => {
-        const elements = document.querySelectorAll(CONSTANTS.querySelectors.pokemon);
-        elements.forEach((pokemon) => {
-            if (!pokemon.closest(CONSTANTS.querySelectors.partyContainer)) {
-                pokemon.dispatchEvent(new Event("mouseover"));
+const isSpeciesOrEvolutionInSearch = (pokemon, search) => {
+    const { species, forme, baseForm, gender } = pokemon;
+    const searchItem = search.find((item) => item.species === species);
+    if (!searchItem) {
+        return search.some((item) => {
+            if (item.species === baseForm) {
+                return ((item.gender ? item.gender === gender : true) &&
+                    (item.forme ? item.forme === forme : true));
             }
+            return false;
         });
+    }
+    if (searchItem.gender && searchItem.forme) {
+        return searchItem.gender === gender && searchItem.forme === forme;
+    }
+    if (searchItem.gender) {
+        return searchItem.gender === gender;
+    }
+    if (searchItem.forme) {
+        return searchItem.forme === forme;
+    }
+    return true;
+};
+
+const getPokemonInfo = (element) => {
+    const species = getSpecifiedField(element, 3);
+    const baseForm = EVOLUTION_MAPPING[species];
+    const forme = species && !IGNORED_SPECIES.includes(species)
+        ? getSpecifiedField(element, 4)
+        : null;
+    const nature = getNature(getSpecifiedField(element, forme ? 9 : 8));
+    const gender = getGender(element);
+    const linkElement = element.querySelector("a");
+    const link = linkElement ? linkElement.href : null;
+    const pokemon = {
+        baseForm,
+        species,
+        nature,
+        forme,
+        gender,
+        link,
+        hasInfo: Boolean(species && baseForm),
+        isSpeciesOrEvolutionInSearch: (search) => isSpeciesOrEvolutionInSearch(pokemon, search),
+        log: () => console.log(`Species: ${pokemon.baseForm}, `, `Gender: ${pokemon.gender || "N/A"}, `, `Nature: ${pokemon.nature || "N/A"}, `, `Forme: ${pokemon.forme || "N/A"}, `, `Link: ${pokemon.link || "No link"}`),
     };
+    return pokemon;
+};
 
-    const logTooltipInfo = () => {
-        console.clear();
-        const tooltips = document.querySelectorAll(CONSTANTS.querySelectors.tooltip);
-        let loggedCount = 0;
+const QUERY_SELECTORS = {
+    tooltip: "#field_field > div.field > div.tooltip_content > div.fieldmontip",
+};
 
-        tooltips.forEach((tooltip) => {
-            if (!tooltip.closest(CONSTANTS.querySelectors.partyContainer)) {
-                if (getPokemonInfo(tooltip)) {
-                    loggedCount++;
-                }
-            }
-        });
+const start = () => {
+    console.clear();
+    const tooltips = document.querySelectorAll(QUERY_SELECTORS.tooltip);
+    const pokemonInfo = Array.from(tooltips)
+        .map(getPokemonInfo)
+        .filter((x) => x.hasInfo);
+    pokemonInfo.forEach((x) => x.log());
+    console.log(`Total Pokémon listed in console: ${pokemonInfo.length}`);
+};
 
-        console.log(`Total Pokémon listed in console: ${loggedCount}`);
-    };
-
-    const startExtractor = () => {
-        triggerTooltips();
-        setTimeout(logTooltipInfo, 3000);
-    };
-
-    startExtractor();
-    setInterval(startExtractor, 5000);
+setInterval(start, 5000);
 
 })();
