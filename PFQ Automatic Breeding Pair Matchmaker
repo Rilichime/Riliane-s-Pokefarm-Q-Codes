@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PFQ Auto Match Finder
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Compare PFQ Pokémon in fields and show matches in other people's fields.
 // @match        https://pokefarm.com/fields*
 // @grant        none
@@ -1344,14 +1344,16 @@
             return;
         }
 
-        const tooltips = document.querySelectorAll('.fieldmontip');
-        const parsed = [];
+    const allTooltips = document.querySelectorAll('.fieldmontip');
+    const tooltips = [...allTooltips].filter(tip => !tip.closest('#field_party'));
 
-        tooltips.forEach(tooltip => {
-            if (isOwnField && tooltip.textContent.includes('🩷')) return;
+    const parsed = [];
 
-            const mon = getPokemonDataFromTooltip(tooltip);
-            if (mon.species) parsed.push(mon);
+    tooltips.forEach(tooltip => {
+        if (isOwnField && tooltip.textContent.includes('🩷')) return;
+
+        const mon = getPokemonDataFromTooltip(tooltip);
+        if (mon.species) parsed.push(mon);
         });
 
         const allSavedData = loadAllFieldsData();
