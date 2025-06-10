@@ -8,6 +8,7 @@
 // @icon         https://cdn-icons-png.flaticon.com/128/5091/5091398.png
 // ==/UserScript==
 
+
 (function () {
     'use strict';
 
@@ -1034,6 +1035,10 @@
     Gobistream: "Bafftoi",
     Lichoung: "Lichoung",
     Eldereen: "Lichoung",
+    Elecko: "Elecko",
+    Squalorann: "Squalorann",
+    Monitrolyte: "Elecko",
+    Teddigrade: "Teddigrade",
     "Shooting Star Cleffa": "Shooting Star Cleffa",
     "Shooting Star Clefairy": "Shooting Star Cleffa",
     "Shooting Star Clefable": "Shooting Star Cleffa",
@@ -1101,7 +1106,6 @@
     Lycanwool: "Ruffwool",
     Frosdour: "Frosour",
     Chilldoom: "Frosdour",
-
     };
 
     function getGender(tooltip) {
@@ -1262,6 +1266,19 @@
             `;
             container.appendChild(entry);
         });
+
+        // NEW: Add under-8 notification below the matches
+        const under8 = findFamiliesUnderThreshold(loadAllFieldsData(), 8);
+        if (under8.length > 0) {
+            const summaryDiv = document.createElement('div');
+            summaryDiv.style.marginTop = '10px';
+            summaryDiv.style.padding = '6px';
+            summaryDiv.style.background = '#333';
+            summaryDiv.style.borderRadius = '6px';
+            summaryDiv.style.color = '#ffcc00';
+            summaryDiv.innerHTML = `<strong>Notice:</strong> You have less than 8 Pokémon in these family lines:<br>${under8.join(', ')}`;
+            container.appendChild(summaryDiv);
+        }
     }
 
     function updateLoggedUI(allSavedData) {
@@ -1327,6 +1344,66 @@
         });
     }
 
+    function findFamiliesUnderThreshold(allSavedData, threshold) {
+        // Collate all Pokémon into a single array
+        const allMons = Object.values(allSavedData).flat();
+
+        // Count by base species
+        const familyCounts = {};
+        allMons.forEach(mon => {
+            const base = getBaseSpecies(mon.species);
+            familyCounts[base] = (familyCounts[base] || 0) + 1;
+        });
+
+        // Collect those under threshold
+        return Object.keys(familyCounts)
+            .filter(base => familyCounts[base] < threshold)
+            .sort((a, b) => familyCounts[a] - familyCounts[b])
+            .map(base => `${base} (${familyCounts[base]})`);
+    }
+
+    // NEW FUNCTION - Show Pokémon in other user's fields from families you have under threshold
+    function showUnderThresholdOthers(parsedMons, allSavedData, threshold) {
+        const familyCounts = {};
+        Object.values(allSavedData).flat().forEach(mon => {
+            const base = getBaseSpecies(mon.species);
+            familyCounts[base] = (familyCounts[base] || 0) + 1;
+        });
+
+        // Determine which families are below threshold
+        const underFamilies = Object.keys(familyCounts).filter(base => familyCounts[base] < threshold);
+
+        // Filter parsedMons to only those from under-threshold families
+        const underThresholdMons = parsedMons.filter(mon => {
+            const base = getBaseSpecies(mon.species);
+            return underFamilies.includes(base);
+        });
+
+        // Show in the panel
+        const container = document.getElementById('pfq-match-content');
+        if (!container) return;
+
+        if (underThresholdMons.length > 0) {
+            const section = document.createElement('div');
+            section.style.marginTop = '10px';
+            section.style.padding = '6px';
+            section.style.background = '#222';
+            section.style.borderRadius = '6px';
+            section.style.color = '#ffa500';
+
+            section.innerHTML = `<strong>Other's Pokémon from families you have under ${threshold}:</strong><br>`;
+
+            underThresholdMons.forEach(mon => {
+                const line = document.createElement('div');
+                line.style.marginLeft = '10px';
+                line.innerHTML = `Species: ${mon.species}, Gender: ${mon.gender || "N/A"}, Nature: ${mon.nature}, Forme: ${mon.forme || "Default"}, <a href="${mon.link}" target="_blank" style="color:lightblue;">Link</a>`;
+                section.appendChild(line);
+            });
+
+            container.appendChild(section);
+        }
+    }
+
     function parseTooltipsAndCompare() {
         const currentFieldName = getCurrentFieldName();
 
@@ -1344,16 +1421,16 @@
             return;
         }
 
-    const allTooltips = document.querySelectorAll('.fieldmontip');
-    const tooltips = [...allTooltips].filter(tip => !tip.closest('#field_party'));
+        const allTooltips = document.querySelectorAll('.fieldmontip');
+        const tooltips = [...allTooltips].filter(tip => !tip.closest('#field_party'));
 
-    const parsed = [];
+        const parsed = [];
 
-    tooltips.forEach(tooltip => {
-        if (isOwnField && tooltip.textContent.includes('🩷')) return;
+        tooltips.forEach(tooltip => {
+            if (isOwnField && tooltip.textContent.includes('🩷')) return;
 
-        const mon = getPokemonDataFromTooltip(tooltip);
-        if (mon.species) parsed.push(mon);
+            const mon = getPokemonDataFromTooltip(tooltip);
+            if (mon.species) parsed.push(mon);
         });
 
         const allSavedData = loadAllFieldsData();
@@ -1364,7 +1441,6 @@
             updateLoggedUI(allSavedData);
             console.log(`[PFQ] Saved ${parsed.length} Pokémon from your field: "${currentFieldName}".`);
         } else {
-
             const combinedSavedMons = Object.values(allSavedData).flat();
 
             const matches = parsed.map(mon => {
@@ -1373,6 +1449,9 @@
             }).filter(Boolean);
 
             updateMatchUI(matches);
+
+            // NEW: Show other user's Pokémon from families you have under threshold
+            showUnderThresholdOthers(parsed, allSavedData, 8);
         }
     }
 
@@ -1389,3 +1468,4 @@
         setTimeout(init, 1000);
     });
 })();
+
