@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PFQ Auto Match Finder
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      3.0
 // @description  Compare PFQ Pokémon in fields and show matches in other people's fields.
 // @match        https://pokefarm.com/fields*
 // @grant        none
@@ -1213,18 +1213,18 @@
             panel = document.createElement('div');
             panel.id = 'pfq-match-panel';
             panel.style.position = 'fixed';
-            panel.style.left = '0';
-            panel.style.top = '100px';
+            panel.style.left = '4px';
+            panel.style.top = '30px';
             panel.style.width = '600px';
-            panel.style.height = '600px';
+            panel.style.height = '370px';
             panel.style.overflow = 'auto';
-            panel.style.zIndex = '9999';
+            panel.style.zIndex = '100';
             panel.style.background = 'rgba(0,0,0,0.85)';
             panel.style.color = 'white';
             panel.style.padding = '10px';
             panel.style.fontSize = '14px';
             panel.style.fontFamily = 'sans-serif';
-            panel.style.borderRight = '3px solid #888';
+
 
             panel.innerHTML = `
                 <h2 style="margin-top:0;">Matched Pokémon</h2>
