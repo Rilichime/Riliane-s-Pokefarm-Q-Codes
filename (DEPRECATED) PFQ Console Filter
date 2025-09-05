@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         PFQ Console Filter
+// @name         (DEPRECATED) PFQ Console Filter
 // @namespace    http://tampermonkey.net/
 // @version      1.0
 // @description  Returns matches on Pokemon species, gender, and forme.
