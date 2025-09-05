@@ -1,0 +1,315 @@
+// ==UserScript==
+// @name         PFQ Market Logger
+// @version      1.0
+// @description  Logs sold prices for items viewed in the market and provides a chart for tracking trends.
+// @match        https://pokefarm.com/marketboard*
+// @grant        none
+// @icon         https://cdn-icons-png.flaticon.com/128/2422/2422792.png
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const STORAGE_KEY_DATA = 'pfq_market_data_v3';
+    const STORAGE_KEY_IGNORED = 'pfq_market_ignored_v3';
+    const STORAGE_KEY_UI = 'pfq_market_ui_v3';
+    const STORAGE_KEY_NOTES = 'pfq_market_notes_v3';
+    const RUN_INTERVAL_MS = 3000;
+
+    const months = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
+
+    function loadLS(key, fallback) { try{ return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch{return fallback;} }
+    function saveLS(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
+
+    function stableId(itemName,dateStr,user,price,qty){ return `${itemName}||${dateStr}||${user}||${price}||${qty}`; }
+    function toNumber(txt){ return parseInt((txt||'').replace(/[^\d]/g,''))||0; }
+    function parseQty(txt){ return parseInt((txt||'').replace(/[^\d]/g,''))||0; }
+
+    function parseSoldDateToTS(dateStr){
+        const m = dateStr.trim().match(/^(\d{1,2})\/([A-Za-z]{3})\s+(\d{2}):(\d{2})$/);
+        if(!m) return null;
+        const day = parseInt(m[1],10), mon=months[m[2]], hour=parseInt(m[3],10), minute=parseInt(m[4],10);
+        if(isNaN(mon)) return null;
+        const now = new Date();
+        let year = now.getFullYear();
+        let d = new Date(year, mon, day, hour, minute);
+        if(d.getTime() > now.getTime()) d = new Date(year-1, mon, day, hour, minute);
+        return d.getTime();
+    }
+
+    function fmtNumber(n){
+        if(n >= 1_000_000) return (Math.round(n/100_000)/10)+' mil';
+        if(n >= 1_000) return Math.round(n/1_000)+' k';
+        return n.toString();
+    }
+
+    function escapeHTML(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function createPanel(){
+        const panel = document.createElement('div');
+        panel.id='pfq-market-logger-panel';
+        Object.assign(panel.style,{
+            position:'fixed', left:'4px', top:'30px', width:'1200px', height:'350px',
+            overflow:'auto', zIndex:'100', background:'rgba(0,0,0,0.85)',
+            color:'white', padding:'10px', fontSize:'14px', fontFamily:'sans-serif'
+        });
+
+        panel.innerHTML=`
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+            <strong id="pfq-ml-item-name" style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Item: (detecting...)</strong>
+            <button id="pfq-ml-run" style="cursor:pointer;">Run now</button>
+            <button id="pfq-ml-export" style="cursor:pointer;">Export CSV</button>
+            <button id="pfq-ml-upload" style="cursor:pointer;">Upload CSV</button>
+            <button id="pfq-ml-hide" style="cursor:pointer;">Hide</button>
+        </div>
+        <canvas id="pfq-ml-canvas" width="1180" height="160" style="width:1180px;height:160px;background:rgba(255,255,255,0.06);border-radius:6px;"></canvas>
+        <div id="pfq-ml-stats" style="margin:6px 0 10px 0; opacity:0.9;"></div>
+        <table id="pfq-ml-table" style="width:100%;border-collapse:collapse;">
+            <thead>
+                <tr>
+                    <th>Ignore</th><th>Sold Date</th><th>User</th><th>Price each</th><th>Qty</th><th>Note</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        `;
+        document.body.appendChild(panel);
+
+        const showBtn = document.createElement('button');
+        showBtn.id='pfq-ml-show'; showBtn.textContent='Show Price Tracker';
+        Object.assign(showBtn.style,{position:'fixed',left:'4px',top:'30px',zIndex:'101',display:'none',cursor:'pointer'});
+        document.body.appendChild(showBtn);
+        showBtn.addEventListener('click',()=>{panel.style.display='';showBtn.style.display='none';const ui=loadLS(STORAGE_KEY_UI,{});ui.hidden=false;saveLS(STORAGE_KEY_UI,ui);});
+        panel.querySelector('#pfq-ml-hide').addEventListener('click',()=>{panel.style.display='none';showBtn.style.display='';const ui=loadLS(STORAGE_KEY_UI,{});ui.hidden=true;saveLS(STORAGE_KEY_UI,ui);});
+        panel.querySelector('#pfq-ml-run').addEventListener('click', runOnce);
+        panel.querySelector('#pfq-ml-export').addEventListener('click', exportCSV);
+        panel.querySelector('#pfq-ml-upload').addEventListener('click', uploadCSV);
+
+        const ui = loadLS(STORAGE_KEY_UI,{});
+        if(ui.hidden){panel.style.display='none';showBtn.style.display='';}
+        return panel;
+    }
+
+    function getVisibleSellerLists(){ return Array.from(document.querySelectorAll('ul.sellerlist')).filter(ul=>ul.offsetParent!==null); }
+    function findItemNameForSellerList(ul){
+        let container = ul.closest('li, .mb-item, .marketboard, div')||ul.parentElement;
+        let nameSpan = container.querySelector('a span.name span.name')||container.querySelector('span.name span.name');
+        if(!nameSpan){ const allNames=Array.from(document.querySelectorAll('a span.name span.name, span.name span.name'));
+        nameSpan=allNames.find(sp=>sp.offsetParent!==null);}
+        return nameSpan?.textContent.trim()||null;
+    }
+
+    function scrapeOnce(){
+        const visibleLists=getVisibleSellerLists();
+        const data=loadLS(STORAGE_KEY_DATA,{});
+        const ignored=loadLS(STORAGE_KEY_IGNORED,{});
+        const notes = loadLS(STORAGE_KEY_NOTES,{});
+        let firstDetectedItem=null;
+        for(const ul of visibleLists){
+            const itemName=findItemNameForSellerList(ul);
+            if(!itemName) continue;
+            if(!firstDetectedItem) firstDetectedItem=itemName;
+            if(!data[itemName]) data[itemName]={entries:[]};
+            const existing=data[itemName].entries;
+            const existingIds=new Set(existing.map(e=>e.id));
+            const rows=Array.from(ul.querySelectorAll('li')).filter(li=>!li.classList.contains('th'));
+            for(const li of rows){
+                const unitEl=li.querySelector('.unit'); const qtyEl=li.querySelector('.q'); const totalEl=li.querySelector('.total');
+                if(!unitEl||!qtyEl||!totalEl) continue;
+                const priceEach=toNumber(unitEl.textContent);
+                const qty=parseQty(qtyEl.textContent);
+                const dateText=(totalEl.innerHTML.split('<br>')[0]||totalEl.textContent).replace(/<[^>]*>/g,'').trim();
+                const afterBr=totalEl.innerHTML.split('<br>')[1]||''; const user=afterBr.replace(/to\s*/i,'').replace(/<[^>]*>/g,'').trim()||'';
+                const dateStr=dateText; const ts=parseSoldDateToTS(dateStr); if(!ts) continue;
+                const id=stableId(itemName,dateStr,user,priceEach,qty);
+                if(existingIds.has(id)) continue;
+                existing.push({id,ts,dateStr,user,price:priceEach,qty,ignored:!!ignored[id],note:notes[id]||''});
+            }
+            data[itemName].entries.sort((a,b)=>b.ts-a.ts);
+        }
+        saveLS(STORAGE_KEY_DATA,data);
+        if(firstDetectedItem){const ui=loadLS(STORAGE_KEY_UI,{});ui.lastItem=firstDetectedItem;saveLS(STORAGE_KEY_UI,ui);}
+        return firstDetectedItem;
+    }
+
+    function renderPanel(){
+        const panel=document.getElementById('pfq-market-logger-panel'); if(!panel) return;
+        const ui=loadLS(STORAGE_KEY_UI,{}); const data=loadLS(STORAGE_KEY_DATA,{});
+        const notes=loadLS(STORAGE_KEY_NOTES,{});
+        let itemName=ui.lastItem||''; if(!itemName){itemName=scrapeOnce()||'(no item detected yet)';const ui2=loadLS(STORAGE_KEY_UI,{});ui2.lastItem=itemName;saveLS(STORAGE_KEY_UI,ui2);}
+        panel.querySelector('#pfq-ml-item-name').textContent=`Item: ${itemName}`;
+        const tbody=panel.querySelector('#pfq-ml-table tbody'); tbody.innerHTML='';
+        const allEntries=(data[itemName]?.entries||[]).slice().sort((a,b)=>b.ts-a.ts);
+        const ignoredMap=loadLS(STORAGE_KEY_IGNORED,{});
+        for(const e of allEntries){
+            const tr=document.createElement('tr');
+            tr.innerHTML=`
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <input type="checkbox" ${e.ignored?'checked':''} data-id="${e.id}" />
+                </td>
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${e.dateStr}</td>
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${escapeHTML(e.user)}</td>
+                <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${fmtNumber(e.price)}</td>
+                <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${e.qty}</td>
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); width:250px;">
+                    <input type="text" class="note-input" data-id="${e.id}" value="${escapeHTML(notes[e.id]||e.note||'')}"
+                           style="width:100%;background:rgba(255,255,255,0.1);color:white;border:none;padding:2px;" />
+                </td>
+            `;
+            tbody.appendChild(tr);
+
+            const cb=tr.querySelector('input[type=checkbox]');
+            cb.addEventListener('change',()=>{
+                e.ignored=cb.checked;
+                if(cb.checked) ignoredMap[e.id]=true; else delete ignoredMap[e.id];
+                saveLS(STORAGE_KEY_IGNORED,ignoredMap);
+                const store=loadLS(STORAGE_KEY_DATA,{});
+                const list=store[itemName]?.entries||[];
+                const idx=list.findIndex(x=>x.id===e.id);
+                if(idx!==-1){list[idx].ignored=e.ignored; saveLS(STORAGE_KEY_DATA,store);}
+                drawChartFor(itemName); updateStats(itemName);
+            });
+
+            const noteInput = tr.querySelector('.note-input');
+            noteInput.addEventListener('input', ()=>{
+                const id = noteInput.dataset.id;
+                const val = noteInput.value;
+                notes[id] = val;
+                saveLS(STORAGE_KEY_NOTES, notes);
+
+                const store = loadLS(STORAGE_KEY_DATA, {});
+                const list = store[itemName]?.entries || [];
+                const entry = list.find(x => x.id === id);
+                if(entry){ entry.note = val; saveLS(STORAGE_KEY_DATA, store); }
+
+                drawChartFor(itemName);
+            });
+        }
+        drawChartFor(itemName); updateStats(itemName);
+    }
+
+    function updateStats(itemName){
+        const statsEl=document.getElementById('pfq-ml-stats');
+        const data=loadLS(STORAGE_KEY_DATA,{});
+        const entries=(data[itemName]?.entries||[]);
+        const used=entries.filter(e=>!e.ignored);
+        if(used.length===0){statsEl.textContent='No usable points.';return;}
+        const min=Math.min(...used.map(e=>e.price));
+        const max=Math.max(...used.map(e=>e.price));
+        const avg=Math.round(used.reduce((a,b)=>a+b.price,0)/used.length);
+        statsEl.textContent=`Price: min ${fmtNumber(min)} | max ${fmtNumber(max)} | avg ${fmtNumber(avg)} | total entries: ${entries.length}`;
+    }
+
+    function drawChartFor(itemName){
+        const canvas = document.getElementById('pfq-ml-canvas');
+        if(!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const cssW = canvas.clientWidth || 1180;
+        const cssH = canvas.clientHeight || 160;
+        if(canvas.width!==cssW*dpr || canvas.height!==cssH*dpr){ canvas.width=cssW*dpr; canvas.height=cssH*dpr; }
+        ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,cssW,cssH);
+
+        const padding = {left:50, right:10, top:10, bottom:20};
+        const w = cssW - padding.left - padding.right;
+        const h = cssH - padding.top - padding.bottom;
+        const data = loadLS(STORAGE_KEY_DATA,{});
+        const notes=loadLS(STORAGE_KEY_NOTES,{});
+        const entries=(data[itemName]?.entries||[]).filter(e=>!e.ignored);
+        const today=new Date(); const start=new Date(today.getFullYear(), today.getMonth()-6, today.getDate());
+
+        const dayBins={};
+        for(let d=new Date(start); d<=today; d.setDate(d.getDate()+1)){ const key=d.toISOString().split('T')[0]; dayBins[key]=[]; }
+
+        entries.forEach(e=>{
+            const key=new Date(e.ts).toISOString().split('T')[0];
+            if(dayBins[key]) dayBins[key].push(e.price);
+        });
+
+        const dailyData=Object.entries(dayBins).map(([date,prices])=>{
+            if(prices.length===0) return {date, avg:null, notes:[]};
+            const avg=Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);
+            const dayNotes = entries.filter(en=>notes[en.id] && new Date(en.ts).toISOString().split('T')[0]===date).map(en=>notes[en.id]);
+            return {date, avg, notes:dayNotes};
+        });
+
+        const validPrices=dailyData.filter(d=>d.avg!==null).map(d=>d.avg);
+        const minPrice=validPrices.length?Math.min(...validPrices):0;
+        const maxPrice=validPrices.length?Math.max(...validPrices):0;
+
+        ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1;
+        ctx.beginPath();
+        ctx.moveTo(padding.left,padding.top); ctx.lineTo(padding.left,padding.top+h); ctx.lineTo(padding.left+w,padding.top+h); ctx.stroke();
+
+        const xt=i=>padding.left + (i/(dailyData.length-1))*w;
+        const yt=price=>padding.top+h - ((price-minPrice)/(maxPrice-minPrice))*h;
+
+        ctx.strokeStyle='rgba(100,200,255,0.9)'; ctx.lineWidth=2; ctx.beginPath();
+        dailyData.forEach((d,i)=>{ if(d.avg===null) return; const x=xt(i),y=yt(d.avg); if(!ctx._started){ctx.moveTo(x,y);ctx._started=true;} else ctx.lineTo(x,y); });
+        ctx.stroke(); ctx._started=false;
+
+        const points=[];
+        dailyData.forEach((d,i)=>{
+            if(d.avg===null) return;
+            const x=xt(i),y=yt(d.avg);
+            ctx.beginPath(); ctx.arc(x,y,3,0,2*Math.PI);
+            ctx.fillStyle=d.notes.length?'red':'white';
+            ctx.fill();
+            points.push({x,y,data:d});
+        });
+
+        let tip=document.getElementById('pfq-ml-tooltip');
+        if(!tip){ tip=document.createElement('div'); tip.id='pfq-ml-tooltip'; Object.assign(tip.style,{position:'fixed',background:'rgba(0,0,0,0.85)',color:'white',padding:'4px 6px',borderRadius:'4px',fontSize:'12px',pointerEvents:'none',zIndex:'200',display:'none'}); document.body.appendChild(tip);}
+        canvas.onmousemove=e=>{
+            const rect=canvas.getBoundingClientRect(); const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+            const hit=points.find(p=>Math.hypot(p.x-mx,p.y-my)<=6);
+            if(hit){
+                tip.innerHTML=`${hit.data.date}<br>${fmtNumber(hit.data.avg)}` + (hit.data.notes.length?'<br>Notes: '+hit.data.notes.join('; ') :'');
+                tip.style.left=(e.clientX+8)+'px'; tip.style.top=(e.clientY+8)+'px'; tip.style.display='block';
+            }else tip.style.display='none';
+        };
+        canvas.onmouseleave=()=>{tip.style.display='none';};
+    }
+
+    function runOnce(){ scrapeOnce(); renderPanel(); }
+    function exportCSV(){
+        const ui=loadLS(STORAGE_KEY_UI,{}); const data=loadLS(STORAGE_KEY_DATA,{});
+        const item=ui.lastItem; if(!item)return alert('No item selected');
+        const entries=data[item]?.entries||[];
+        const csv=['SoldDate,User,Price,Qty,Ignored,Note'];
+        entries.forEach(e=>csv.push([e.dateStr,e.user,e.price,e.qty,e.ignored,e.note||''].map(v=>`"${v}"`).join(',')));
+        const blob=new Blob([csv.join('\n')],{type:'text/csv'}); const url=URL.createObjectURL(blob);
+        const a=document.createElement('a'); a.href=url; a.download=item.replace(/[^a-z0-9]/gi,'_')+'.csv'; a.click(); URL.revokeObjectURL(url);
+    }
+    function uploadCSV(){
+        const input=document.createElement('input'); input.type='file'; input.accept='.csv';
+        input.onchange=()=>{
+            const file=input.files[0]; if(!file) return;
+            const reader=new FileReader();
+            reader.onload=e=>{
+                const text=e.target.result.split(/\r?\n/).slice(1);
+                const ui=loadLS(STORAGE_KEY_UI,{}); const data=loadLS(STORAGE_KEY_DATA,{});
+                const notes=loadLS(STORAGE_KEY_NOTES,{});
+                const ignored=loadLS(STORAGE_KEY_IGNORED,{});
+                if(!data[ui.lastItem])data[ui.lastItem]={entries:[]};
+                for(const line of text){ const row=line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/); if(row.length<6)continue;
+                    const [dateStr,user,price,qty,ign,note]=row.map(s=>s.replace(/^"|"$/g,''));
+                    const id=stableId(ui.lastItem,dateStr,user,price,qty);
+                    if(data[ui.lastItem].entries.find(x=>x.id===id)) continue;
+                    data[ui.lastItem].entries.push({id,ts:parseSoldDateToTS(dateStr)||Date.now(),dateStr,user,price:parseInt(price)||0,qty:parseInt(qty)||0,ignored:ign==='true',note:note||''});
+                    if(note) notes[id]=note;
+                    if(ign==='true') ignored[id]=true;
+                }
+                saveLS(STORAGE_KEY_DATA,data); saveLS(STORAGE_KEY_NOTES,notes); saveLS(STORAGE_KEY_IGNORED,ignored);
+                renderPanel();
+            };
+            reader.readAsText(file);
+        };
+        input.click();
+    }
+
+    const panel = createPanel();
+    runOnce();
+    setInterval(runOnce,RUN_INTERVAL_MS);
+
+})();
