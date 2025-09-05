@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         PFQ Market Logger
-// @version      1.0
+// @version      1.1
 // @description  Logs sold prices for items viewed in the market and provides a chart for tracking trends.
 // @match        https://pokefarm.com/marketboard*
 // @grant        none
@@ -281,32 +281,94 @@
         const blob=new Blob([csv.join('\n')],{type:'text/csv'}); const url=URL.createObjectURL(blob);
         const a=document.createElement('a'); a.href=url; a.download=item.replace(/[^a-z0-9]/gi,'_')+'.csv'; a.click(); URL.revokeObjectURL(url);
     }
-    function uploadCSV(){
-        const input=document.createElement('input'); input.type='file'; input.accept='.csv';
+function uploadCSV(){
+    const ui=loadLS(STORAGE_KEY_UI,{});
+    const data=loadLS(STORAGE_KEY_DATA,{});
+    const notes=loadLS(STORAGE_KEY_NOTES,{});
+    const ignored=loadLS(STORAGE_KEY_IGNORED,{});
+
+    // --- Create overlay for item selection ---
+    const overlay=document.createElement('div');
+    Object.assign(overlay.style,{
+        position:'fixed',top:0,left:0,right:0,bottom:0,
+        background:'rgba(0,0,0,0.7)',zIndex:2000,display:'flex',
+        justifyContent:'center',alignItems:'center'
+    });
+
+    const box=document.createElement('div');
+    Object.assign(box.style,{
+        background:'#222',padding:'20px',borderRadius:'8px',
+        color:'white',width:'400px',maxHeight:'70%',overflow:'auto'
+    });
+    box.innerHTML=`<h3>Select Item for CSV</h3>
+        <input type="text" id="pfq-ml-item-search" placeholder="Search item..."
+               style="width:100%;margin-bottom:8px;padding:4px;" />
+        <select id="pfq-ml-item-select" size="10" style="width:100%;"></select><br>
+        <button id="pfq-ml-item-ok" style="margin-top:8px;">OK</button>
+        <button id="pfq-ml-item-cancel" style="margin-top:8px;margin-left:6px;">Cancel</button>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    // --- Populate dropdown with all known items in alpha order ---
+    const select=box.querySelector('#pfq-ml-item-select');
+    const allItems=Object.keys(data).sort((a,b)=>a.localeCompare(b));
+    allItems.forEach(it=>{
+        const opt=document.createElement('option');
+        opt.value=it; opt.textContent=it;
+        select.appendChild(opt);
+    });
+
+    // --- Search filter ---
+    const search=box.querySelector('#pfq-ml-item-search');
+    search.addEventListener('input',()=>{
+        const term=search.value.toLowerCase();
+        Array.from(select.options).forEach(opt=>{
+            opt.style.display=opt.textContent.toLowerCase().includes(term)?'':'none';
+        });
+    });
+
+    // --- Button actions ---
+    box.querySelector('#pfq-ml-item-cancel').onclick=()=>overlay.remove();
+    box.querySelector('#pfq-ml-item-ok').onclick=()=>{
+        const chosen=select.value;
+        if(!chosen){alert('Please select an item.');return;}
+        overlay.remove();
+
+        // File input as before
+        const input=document.createElement('input');
+        input.type='file'; input.accept='.csv';
         input.onchange=()=>{
             const file=input.files[0]; if(!file) return;
             const reader=new FileReader();
             reader.onload=e=>{
                 const text=e.target.result.split(/\r?\n/).slice(1);
-                const ui=loadLS(STORAGE_KEY_UI,{}); const data=loadLS(STORAGE_KEY_DATA,{});
-                const notes=loadLS(STORAGE_KEY_NOTES,{});
-                const ignored=loadLS(STORAGE_KEY_IGNORED,{});
-                if(!data[ui.lastItem])data[ui.lastItem]={entries:[]};
-                for(const line of text){ const row=line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/); if(row.length<6)continue;
+                if(!data[chosen])data[chosen]={entries:[]};
+                for(const line of text){
+                    const row=line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+                    if(row.length<6)continue;
                     const [dateStr,user,price,qty,ign,note]=row.map(s=>s.replace(/^"|"$/g,''));
-                    const id=stableId(ui.lastItem,dateStr,user,price,qty);
-                    if(data[ui.lastItem].entries.find(x=>x.id===id)) continue;
-                    data[ui.lastItem].entries.push({id,ts:parseSoldDateToTS(dateStr)||Date.now(),dateStr,user,price:parseInt(price)||0,qty:parseInt(qty)||0,ignored:ign==='true',note:note||''});
+                    const id=stableId(chosen,dateStr,user,price,qty);
+                    if(data[chosen].entries.find(x=>x.id===id)) continue;
+                    data[chosen].entries.push({
+                        id,ts:parseSoldDateToTS(dateStr)||Date.now(),
+                        dateStr,user,price:parseInt(price)||0,
+                        qty:parseInt(qty)||0,ignored:ign==='true',note:note||''
+                    });
                     if(note) notes[id]=note;
                     if(ign==='true') ignored[id]=true;
                 }
-                saveLS(STORAGE_KEY_DATA,data); saveLS(STORAGE_KEY_NOTES,notes); saveLS(STORAGE_KEY_IGNORED,ignored);
+                saveLS(STORAGE_KEY_DATA,data);
+                saveLS(STORAGE_KEY_NOTES,notes);
+                saveLS(STORAGE_KEY_IGNORED,ignored);
+                const ui2=loadLS(STORAGE_KEY_UI,{});
+                ui2.lastItem=chosen; saveLS(STORAGE_KEY_UI,ui2);
                 renderPanel();
             };
             reader.readAsText(file);
         };
         input.click();
-    }
+    };
+}
 
     const panel = createPanel();
     runOnce();
