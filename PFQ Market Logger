@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         PFQ Market Logger
-// @version      1.3
-// @description  Logs sold prices for items viewed in the market and provides a chart for tracking trends.
+// @name         PFQ Market Logger Enhanced
+// @version      2.2
+// @description  Logs sold prices for items viewed in the market with quantity categories and outlier detection
 // @match        https://pokefarm.com/marketboard*
 // @grant        none
 // @icon         https://cdn-icons-png.flaticon.com/128/2422/2422792.png
@@ -10,564 +10,807 @@
 (function() {
     'use strict';
 
-    const STORAGE_KEY_DATA = 'pfq_market_data_v3';
-    const STORAGE_KEY_IGNORED = 'pfq_market_ignored_v3';
-    const STORAGE_KEY_UI = 'pfq_market_ui_v3';
-    const STORAGE_KEY_NOTES = 'pfq_market_notes_v3';
-    const STORAGE_KEY_SCAN = 'pfq_market_scanned_v1';
+    const DB_NAME = 'pfq_market_logger';
+    const DB_VERSION = 1;
     const RUN_INTERVAL_MS = 3000;
+    let db = null;
 
     const months = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
 
-    function loadLS(key, fallback) { try{ return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch{return fallback;} }
-    function saveLS(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
+    // IndexedDB wrapper functions
+    async function initDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    function stableId(itemName,dateStr,user,price,qty){ return `${itemName}||${dateStr}||${user}||${price}||${qty}`; }
-    function toNumber(txt){ return parseInt((txt||'').replace(/[^\d]/g,''))||0; }
-    function parseQty(txt){ return parseInt((txt||'').replace(/[^\d]/g,''))||0; }
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                db = request.result;
+                resolve(db);
+            };
 
-    function parseSoldDateToTS(dateStr){
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+
+                // Market entries store
+                if (!db.objectStoreNames.contains('entries')) {
+                    const entriesStore = db.createObjectStore('entries', { keyPath: 'id' });
+                    entriesStore.createIndex('itemName', 'itemName', { unique: false });
+                    entriesStore.createIndex('timestamp', 'ts', { unique: false });
+                }
+
+                // Settings store (UI state, ignored items, notes, scan times)
+                if (!db.objectStoreNames.contains('settings')) {
+                    db.createObjectStore('settings', { keyPath: 'key' });
+                }
+            };
+        });
+    }
+
+    async function saveEntry(entry) {
+        if (!db) await initDB();
+        const tx = db.transaction(['entries'], 'readwrite');
+        const store = tx.objectStore('entries');
+        return store.put(entry);
+    }
+
+    async function getEntriesByItem(itemName) {
+        if (!db) await initDB();
+        const tx = db.transaction(['entries'], 'readonly');
+        const store = tx.objectStore('entries');
+        const index = store.index('itemName');
+
+        return new Promise((resolve, reject) => {
+            const request = index.getAll(itemName);
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function getAllEntries() {
+        if (!db) await initDB();
+        const tx = db.transaction(['entries'], 'readonly');
+        const store = tx.objectStore('entries');
+
+        return new Promise((resolve, reject) => {
+            const request = store.getAll();
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function getSetting(key, defaultValue = null) {
+        if (!db) await initDB();
+        const tx = db.transaction(['settings'], 'readonly');
+        const store = tx.objectStore('settings');
+
+        return new Promise((resolve, reject) => {
+            const request = store.get(key);
+            request.onsuccess = () => {
+                const result = request.result;
+                resolve(result ? result.value : defaultValue);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function setSetting(key, value) {
+        if (!db) await initDB();
+        const tx = db.transaction(['settings'], 'readwrite');
+        const store = tx.objectStore('settings');
+        return store.put({ key, value });
+    }
+
+    async function updateEntry(id, updates) {
+        if (!db) await initDB();
+        const tx = db.transaction(['entries'], 'readwrite');
+        const store = tx.objectStore('entries');
+
+        return new Promise((resolve, reject) => {
+            const getRequest = store.get(id);
+            getRequest.onsuccess = () => {
+                const entry = getRequest.result;
+                if (entry) {
+                    Object.assign(entry, updates);
+                    const putRequest = store.put(entry);
+                    putRequest.onsuccess = () => resolve(entry);
+                    putRequest.onerror = () => reject(putRequest.error);
+                } else {
+                    reject(new Error('Entry not found'));
+                }
+            };
+            getRequest.onerror = () => reject(getRequest.error);
+        });
+    }
+
+    // Outlier detection functions
+    function calculateOutliers(entries) {
+        if (entries.length < 4) return { outliers: new Set(), q1: null, q3: null, iqr: null };
+
+        const quantities = entries.map(e => e.qty).sort((a, b) => a - b);
+        const n = quantities.length;
+
+        // Calculate quartiles
+        const q1Index = Math.floor(n * 0.25);
+        const q3Index = Math.floor(n * 0.75);
+        const q1 = quantities[q1Index];
+        const q3 = quantities[q3Index];
+        const iqr = q3 - q1;
+
+        // Calculate outlier threshold
+        const upperBound = q3 + 1.5 * iqr;
+
+        // Find outliers (only upper outliers for quantity)
+        const outlierIds = new Set();
+        entries.forEach(entry => {
+            if (entry.qty > upperBound) {
+                outlierIds.add(entry.id);
+            }
+        });
+
+        return { outliers: outlierIds, q1, q3, iqr, upperBound };
+    }
+
+    function categorizeByQuantity(entries) {
+        if (entries.length === 0) return { single: [], multiple: [], bulk: [], median: 0 };
+
+        const quantities = entries.map(e => e.qty).sort((a, b) => a - b);
+        const median = quantities[Math.floor(quantities.length / 2)];
+
+        const categories = {
+            single: entries.filter(e => e.qty === 1),
+            multiple: entries.filter(e => e.qty > 1 && e.qty <= median),
+            bulk: entries.filter(e => e.qty > median),
+            median
+        };
+
+        return categories;
+    }
+
+    function filterEntriesByCategory(entries, category, showOutliers = false) {
+        const outlierData = calculateOutliers(entries);
+        const categories = categorizeByQuantity(entries);
+
+        let filtered = [];
+        switch (category) {
+            case 'single':
+                filtered = categories.single;
+                break;
+            case 'multiple':
+                filtered = categories.multiple;
+                break;
+            case 'bulk':
+                filtered = categories.bulk;
+                break;
+            case 'all':
+            default:
+                filtered = entries;
+                break;
+        }
+
+        // Filter out outliers unless showOutliers is true
+        if (!showOutliers) {
+            filtered = filtered.filter(e => !outlierData.outliers.has(e.id));
+        }
+
+        return { filtered, outlierData, categories };
+    }
+
+    // Utility functions
+    function stableId(itemName, dateStr, user, price, qty) {
+        return `${itemName}||${dateStr}||${user}||${price}||${qty}`;
+    }
+
+    function toNumber(txt) {
+        return parseInt((txt||'').replace(/[^\d]/g,''))||0;
+    }
+
+    function parseQty(txt) {
+        return parseInt((txt||'').replace(/[^\d]/g,''))||0;
+    }
+
+    function parseSoldDateToTS(dateStr) {
         const m = dateStr.trim().match(/^(\d{1,2})\/([A-Za-z]{3})\s+(\d{2}):(\d{2})$/);
         if(!m) return null;
-        const day = parseInt(m[1],10), mon=months[m[2]], hour=parseInt(m[3],10), minute=parseInt(m[4],10);
+        const day = parseInt(m[1],10), mon = months[m[2]], hour = parseInt(m[3],10), minute = parseInt(m[4],10);
         if(isNaN(mon)) return null;
+
+        // Get current time in British timezone (UTC+0 or UTC+1 depending on DST)
         const now = new Date();
-        let year = now.getFullYear();
+        const britishNow = new Date(now.toLocaleString("en-US", {timeZone: "Europe/London"}));
+        let year = britishNow.getFullYear();
+
+        // Create the date in British timezone
         let d = new Date(year, mon, day, hour, minute);
-        if(d.getTime() > now.getTime()) d = new Date(year-1, mon, day, hour, minute);
+
+        // If the constructed date is more than 6 hours in the future compared to British time,
+        // it's probably from the previous year
+        if(d.getTime() > britishNow.getTime() + (6 * 60 * 60 * 1000)) {
+            d = new Date(year-1, mon, day, hour, minute);
+        }
+
         return d.getTime();
     }
 
-    function fmtNumber(n){
+    function fmtNumber(n) {
         if(n >= 1_000_000) return (Math.round(n/100_000)/10)+' mil';
         if(n >= 1_000) return Math.round(n/1_000)+' k';
         return n.toString();
     }
 
-    function escapeHTML(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-function fmtElapsed(ts){
-    if(!ts) return "never";
-    const diff = Math.floor((Date.now() - ts)/1000); // seconds
-    const days = Math.floor(diff / 86400);
-
-    if(diff < 86400){
-        return "Today";
+    function escapeHTML(s) {
+        return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
-    if(days < 7){
-        return `${days}d ago`;
-    }
-    if(days < 30){
-        const weeks = Math.floor(days / 7);
-        return `${weeks}w ago`;
-    }
-    const months = Math.floor(days / 30);
-    return `${months}mo ago`;
-}
 
-    function createPanel(){
+    function fmtElapsed(ts) {
+        if(!ts) return "never";
+        const diff = Math.floor((Date.now() - ts)/1000);
+        const days = Math.floor(diff / 86400);
+
+        if(diff < 86400) return "Today";
+        if(days < 7) return `${days}d ago`;
+        if(days < 30) {
+            const weeks = Math.floor(days / 7);
+            return `${weeks}w ago`;
+        }
+        const months = Math.floor(days / 30);
+        return `${months}mo ago`;
+    }
+
+    function formatDisplayDate(ts) {
+        if (!ts) return '';
+        const date = new Date(ts);
+        const year = date.getFullYear();
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const month = monthNames[date.getMonth()];
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+
+        return `${year} ${month} ${day} ${hours}:${minutes}`;
+    }
+
+    function createPanel() {
         const panel = document.createElement('div');
-        panel.id='pfq-market-logger-panel';
-        Object.assign(panel.style,{
-            position:'fixed', left:'4px', top:'30px', width:'1200px', height:'350px',
+        panel.id = 'pfq-market-logger-panel';
+        Object.assign(panel.style, {
+            position:'fixed', left:'4px', top:'30px', width:'1200px', height:'400px',
             overflow:'auto', zIndex:'100', background:'rgba(0,0,0,0.85)',
             color:'white', padding:'10px', fontSize:'14px', fontFamily:'sans-serif'
         });
 
-        panel.innerHTML=`
+        panel.innerHTML = `
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
             <strong id="pfq-ml-item-name" style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Item: (detecting...)</strong>
+            <label style="display:flex; align-items:center; gap:4px;">
+                Category:
+                <select id="pfq-ml-category" style="padding:4px; background:rgba(0,0,0,0.8); color:white; border:1px solid rgba(255,255,255,0.5); border-radius:3px;">
+                    <option value="all" style="background:rgba(0,0,0,0.9); color:white;">All</option>
+                    <option value="single" style="background:rgba(0,0,0,0.9); color:white;">Single</option>
+                    <option value="multiple" style="background:rgba(0,0,0,0.9); color:white;">Multiple</option>
+                    <option value="bulk" style="background:rgba(0,0,0,0.9); color:white;">Bulk</option>
+                </select>
+            </label>
+            <label style="display:flex; align-items:center; gap:4px;">
+                <input type="checkbox" id="pfq-ml-show-outliers" />
+                Show Outliers
+            </label>
             <button id="pfq-ml-run" style="cursor:pointer;">Run now</button>
             <button id="pfq-ml-export" style="cursor:pointer;">Export CSV</button>
             <button id="pfq-ml-upload" style="cursor:pointer;">Upload CSV</button>
+            <button id="pfq-ml-clear" style="cursor:pointer; background:#d32f2f; color:white;">Clear Data</button>
             <button id="pfq-ml-hide" style="cursor:pointer;">Hide</button>
         </div>
         <canvas id="pfq-ml-canvas" width="1180" height="160" style="width:1180px;height:160px;background:rgba(255,255,255,0.06);border-radius:6px;"></canvas>
         <div id="pfq-ml-stats" style="margin:6px 0 10px 0; opacity:0.9;"></div>
         <table id="pfq-ml-table" style="width:100%;border-collapse:collapse;">
-            <thead>
-                <tr>
-                    <th>Ignore</th><th>Sold Date</th><th>User</th><th>Price each</th><th>Qty</th><th>Note</th>
-                </tr>
-            </thead>
             <tbody></tbody>
         </table>
         `;
         document.body.appendChild(panel);
 
         const showBtn = document.createElement('button');
-        showBtn.id='pfq-ml-show'; showBtn.textContent='Show Price Tracker';
-        Object.assign(showBtn.style,{position:'fixed',left:'4px',top:'30px',zIndex:'101',display:'none',cursor:'pointer'});
+        showBtn.id = 'pfq-ml-show';
+        showBtn.textContent = 'Show Price Tracker';
+        Object.assign(showBtn.style, {
+            position:'fixed',left:'4px',top:'30px',zIndex:'101',display:'none',cursor:'pointer'
+        });
         document.body.appendChild(showBtn);
-        showBtn.addEventListener('click',()=>{panel.style.display='';showBtn.style.display='none';const ui=loadLS(STORAGE_KEY_UI,{});ui.hidden=false;saveLS(STORAGE_KEY_UI,ui);});
-        panel.querySelector('#pfq-ml-hide').addEventListener('click',()=>{panel.style.display='none';showBtn.style.display='';const ui=loadLS(STORAGE_KEY_UI,{});ui.hidden=true;saveLS(STORAGE_KEY_UI,ui);});
+
+        // Event listeners
+        showBtn.addEventListener('click', async () => {
+            panel.style.display = '';
+            showBtn.style.display = 'none';
+            await setSetting('ui_hidden', false);
+        });
+
+        panel.querySelector('#pfq-ml-hide').addEventListener('click', async () => {
+            panel.style.display = 'none';
+            showBtn.style.display = '';
+            await setSetting('ui_hidden', true);
+        });
+
         panel.querySelector('#pfq-ml-run').addEventListener('click', runOnce);
         panel.querySelector('#pfq-ml-export').addEventListener('click', exportCSV);
         panel.querySelector('#pfq-ml-upload').addEventListener('click', uploadCSV);
+        panel.querySelector('#pfq-ml-clear').addEventListener('click', clearAllData);
 
-        const ui = loadLS(STORAGE_KEY_UI,{});
-        if(ui.hidden){panel.style.display='none';showBtn.style.display='';}
+        // Category and outlier filter listeners
+        panel.querySelector('#pfq-ml-category').addEventListener('change', async (e) => {
+            await setSetting('selected_category', e.target.value);
+            await renderPanel();
+        });
+
+        panel.querySelector('#pfq-ml-show-outliers').addEventListener('change', async (e) => {
+            await setSetting('show_outliers', e.target.checked);
+            await renderPanel();
+        });
+
+        // Initialize UI state
+        getSetting('ui_hidden', false).then(hidden => {
+            if(hidden) {
+                panel.style.display = 'none';
+                showBtn.style.display = '';
+            }
+        });
+
+        // Initialize filter settings
+        getSetting('selected_category', 'all').then(category => {
+            panel.querySelector('#pfq-ml-category').value = category;
+        });
+
+        getSetting('show_outliers', false).then(showOutliers => {
+            panel.querySelector('#pfq-ml-show-outliers').checked = showOutliers;
+        });
+
         return panel;
     }
 
-    function getVisibleSellerLists(){ return Array.from(document.querySelectorAll('ul.sellerlist')).filter(ul=>ul.offsetParent!==null); }
-    function findItemNameForSellerList(ul){
-        let container = ul.closest('li, .mb-item, .marketboard, div')||ul.parentElement;
-        let nameSpan = container.querySelector('a span.name span.name')||container.querySelector('span.name span.name');
-        if(!nameSpan){ const allNames=Array.from(document.querySelectorAll('a span.name span.name, span.name span.name'));
-        nameSpan=allNames.find(sp=>sp.offsetParent!==null);}
-        return nameSpan?.textContent.trim()||null;
+    function getVisibleSellerLists() {
+        return Array.from(document.querySelectorAll('ul.sellerlist')).filter(ul => ul.offsetParent !== null);
     }
 
-function updateScannedDisplay(itemName){
-    if(!itemName) return;
-    const scannedMap = loadLS(STORAGE_KEY_SCAN,{});
-    const ts = scannedMap[itemName];
-    const elapsed = fmtElapsed(ts);
-
-    const nameSpans = document.querySelectorAll('.inventory > div > ul > li > span > .name');
-    nameSpans.forEach(ns=>{
-        if(ns.textContent.trim()===itemName){
-            let sub = ns.parentElement.querySelector('.pfq-scanned-time');
-if(!sub){
-    sub = document.createElement('div');
-    sub.className='pfq-scanned-time';
-    sub.style.fontSize='10pt';
-    sub.style.color='var(--col-link2)';
-    sub.style.marginTop='2px';
-    ns.appendChild(sub);
-}
-            sub.textContent = `Scanned: ${elapsed}`;
+    function findItemNameForSellerList(ul) {
+        let container = ul.closest('li, .mb-item, .marketboard, div') || ul.parentElement;
+        let nameSpan = container.querySelector('a span.name span.name') || container.querySelector('span.name span.name');
+        if(!nameSpan) {
+            const allNames = Array.from(document.querySelectorAll('a span.name span.name, span.name span.name'));
+            nameSpan = allNames.find(sp => sp.offsetParent !== null);
         }
-    });
-}
+        return nameSpan?.textContent.trim() || null;
+    }
 
-    function scrapeOnce(){
-        const visibleLists=getVisibleSellerLists();
-        const data=loadLS(STORAGE_KEY_DATA,{});
-        const ignored=loadLS(STORAGE_KEY_IGNORED,{});
-        const notes = loadLS(STORAGE_KEY_NOTES,{});
-        const scanned=loadLS(STORAGE_KEY_SCAN,{});
-        let firstDetectedItem=null;
-        for(const ul of visibleLists){
-            const itemName=findItemNameForSellerList(ul);
-            if(!itemName) continue;
-            if(!firstDetectedItem) firstDetectedItem=itemName;
-            if(!data[itemName]) data[itemName]={entries:[]};
+    async function updateScannedDisplay(itemName) {
+        if(!itemName) return;
+        const scannedMap = await getSetting('scanned_times', {});
+        const ts = scannedMap[itemName];
+        const elapsed = fmtElapsed(ts);
 
-            scanned[itemName] = Date.now();
-
-            const existing=data[itemName].entries;
-            const existingIds=new Set(existing.map(e=>e.id));
-            const rows=Array.from(ul.querySelectorAll('li')).filter(li=>!li.classList.contains('th'));
-            for(const li of rows){
-                const unitEl=li.querySelector('.unit'); const qtyEl=li.querySelector('.q'); const totalEl=li.querySelector('.total');
-                if(!unitEl||!qtyEl||!totalEl) continue;
-                const priceEach=toNumber(unitEl.textContent);
-                const qty=parseQty(qtyEl.textContent);
-                const dateText=(totalEl.innerHTML.split('<br>')[0]||totalEl.textContent).replace(/<[^>]*>/g,'').trim();
-                const afterBr=totalEl.innerHTML.split('<br>')[1]||''; const user=afterBr.replace(/to\s*/i,'').replace(/<[^>]*>/g,'').trim()||'';
-                const dateStr=dateText; const ts=parseSoldDateToTS(dateStr); if(!ts) continue;
-                const id=stableId(itemName,dateStr,user,priceEach,qty);
-                if(existingIds.has(id)) continue;
-                existing.push({id,ts,dateStr,user,price:priceEach,qty,ignored:!!ignored[id],note:notes[id]||''});
+        const nameSpans = document.querySelectorAll('.inventory > div > ul > li > span > .name');
+        nameSpans.forEach(ns => {
+            if(ns.textContent.trim() === itemName) {
+                let sub = ns.parentElement.querySelector('.pfq-scanned-time');
+                if(!sub) {
+                    sub = document.createElement('div');
+                    sub.className = 'pfq-scanned-time';
+                    sub.style.fontSize = '10pt';
+                    sub.style.color = 'var(--col-link2)';
+                    sub.style.marginTop = '2px';
+                    ns.appendChild(sub);
+                }
+                sub.textContent = `Scanned: ${elapsed}`;
             }
-            data[itemName].entries.sort((a,b)=>b.ts-a.ts);
+        });
+    }
+
+    async function scrapeOnce() {
+        const visibleLists = getVisibleSellerLists();
+        const scannedMap = await getSetting('scanned_times', {});
+        let firstDetectedItem = null;
+
+        for(const ul of visibleLists) {
+            const itemName = findItemNameForSellerList(ul);
+            if(!itemName) continue;
+            if(!firstDetectedItem) firstDetectedItem = itemName;
+
+            scannedMap[itemName] = Date.now();
+
+            const existingEntries = await getEntriesByItem(itemName);
+            const existingIds = new Set(existingEntries.map(e => e.id));
+
+            const rows = Array.from(ul.querySelectorAll('li')).filter(li => !li.classList.contains('th'));
+
+            for(const li of rows) {
+                const unitEl = li.querySelector('.unit');
+                const qtyEl = li.querySelector('.q');
+                const totalEl = li.querySelector('.total');
+                if(!unitEl || !qtyEl || !totalEl) continue;
+
+                const priceEach = toNumber(unitEl.textContent);
+                const qty = parseQty(qtyEl.textContent);
+                const dateText = (totalEl.innerHTML.split('<br>')[0] || totalEl.textContent).replace(/<[^>]*>/g,'').trim();
+                const afterBr = totalEl.innerHTML.split('<br>')[1] || '';
+                const user = afterBr.replace(/to\s*/i,'').replace(/<[^>]*>/g,'').trim() || '';
+                const dateStr = dateText;
+                const ts = parseSoldDateToTS(dateStr);
+                if(!ts) continue;
+
+                const id = stableId(itemName, dateStr, user, priceEach, qty);
+                if(existingIds.has(id)) continue;
+
+                const entry = {
+                    id,
+                    itemName,
+                    ts,
+                    dateStr,
+                    user,
+                    price: priceEach,
+                    qty,
+                    ignored: false,
+                    note: ''
+                };
+
+                await saveEntry(entry);
+            }
         }
-        saveLS(STORAGE_KEY_DATA,data);
-        saveLS(STORAGE_KEY_SCAN,scanned);
-        if(firstDetectedItem){
-            const ui=loadLS(STORAGE_KEY_UI,{});ui.lastItem=firstDetectedItem;saveLS(STORAGE_KEY_UI,ui);
-            updateScannedDisplay(firstDetectedItem);
+
+        await setSetting('scanned_times', scannedMap);
+
+        if(firstDetectedItem) {
+            await setSetting('last_item', firstDetectedItem);
+            await updateScannedDisplay(firstDetectedItem);
         }
+
         return firstDetectedItem;
     }
 
-    function renderPanel(){
-        const panel=document.getElementById('pfq-market-logger-panel'); if(!panel) return;
-        const ui=loadLS(STORAGE_KEY_UI,{}); const data=loadLS(STORAGE_KEY_DATA,{});
-        const notes=loadLS(STORAGE_KEY_NOTES,{});
-        let itemName=ui.lastItem||''; if(!itemName){itemName=scrapeOnce()||'(no item detected yet)';const ui2=loadLS(STORAGE_KEY_UI,{});ui2.lastItem=itemName;saveLS(STORAGE_KEY_UI,ui2);}
-        panel.querySelector('#pfq-ml-item-name').textContent=`Item: ${itemName}`;
-        updateScannedDisplay(itemName);
+    function getCategoryLabel(entry, median, outlierIds) {
+        const isOutlier = outlierIds.has(entry.id);
+        let category = '';
 
-        const tbody=panel.querySelector('#pfq-ml-table tbody'); tbody.innerHTML='';
-        const allEntries=(data[itemName]?.entries||[]).slice().sort((a,b)=>b.ts-a.ts);
-        const ignoredMap=loadLS(STORAGE_KEY_IGNORED,{});
-        for(const e of allEntries){
-            const tr=document.createElement('tr');
-            tr.innerHTML=`
+        if (entry.qty === 1) category = 'Single';
+        else if (entry.qty <= median) category = 'Multiple';
+        else category = 'Bulk';
+
+        return isOutlier ? `${category} (Outlier)` : category;
+    }
+
+    async function renderPanel() {
+        const panel = document.getElementById('pfq-market-logger-panel');
+        if(!panel) return;
+
+        // Save current scroll position
+        const scrollTop = panel.scrollTop;
+
+        let itemName = await getSetting('last_item', '');
+        if(!itemName) {
+            itemName = await scrapeOnce() || '(no item detected yet)';
+            await setSetting('last_item', itemName);
+        }
+
+        const selectedCategory = await getSetting('selected_category', 'all');
+        const showOutliers = await getSetting('show_outliers', false);
+
+        panel.querySelector('#pfq-ml-item-name').textContent = `Item: ${itemName}`;
+        await updateScannedDisplay(itemName);
+
+        const tbody = panel.querySelector('#pfq-ml-table tbody');
+        tbody.innerHTML = '';
+
+        const allEntries = await getEntriesByItem(itemName);
+        const { filtered, outlierData, categories } = filterEntriesByCategory(allEntries, selectedCategory, showOutliers);
+
+        // Sort by timestamp (newest first)
+        filtered.sort((a,b) => b.ts - a.ts);
+
+        for(const e of filtered) {
+            const isOutlier = outlierData.outliers.has(e.id);
+            const categoryLabel = getCategoryLabel(e, categories.median, outlierData.outliers);
+
+            const tr = document.createElement('tr');
+            if (isOutlier) {
+                tr.style.backgroundColor = 'rgba(255, 100, 100, 0.1)';
+            }
+
+            tr.innerHTML = `
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">
                     <input type="checkbox" ${e.ignored?'checked':''} data-id="${e.id}" />
                 </td>
-                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${e.dateStr}</td>
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${formatDisplayDate(e.ts)}</td>
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${escapeHTML(e.user)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${fmtNumber(e.price)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${e.qty}</td>
-                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); width:250px;">
-                    <input type="text" class="note-input" data-id="${e.id}" value="${escapeHTML(notes[e.id]||e.note||'')}"
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); font-size:12px;">${categoryLabel}</td>
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); width:200px;">
+                    <input type="text" class="note-input" data-id="${e.id}" value="${escapeHTML(e.note||'')}"
                            style="width:100%;background:rgba(255,255,255,0.1);color:white;border:none;padding:2px;" />
                 </td>
             `;
             tbody.appendChild(tr);
 
-            const cb=tr.querySelector('input[type=checkbox]');
-            cb.addEventListener('change',()=>{
-
-                e.ignored=cb.checked;
-
-                if(cb.checked) ignoredMap[e.id]=true; else delete ignoredMap[e.id];
-
-                saveLS(STORAGE_KEY_IGNORED,ignoredMap);
-
-                const store=loadLS(STORAGE_KEY_DATA,{});
-
-                const list=store[itemName]?.entries||[];
-
-                const idx=list.findIndex(x=>x.id===e.id);
-
-                if(idx!==-1){list[idx].ignored=e.ignored; saveLS(STORAGE_KEY_DATA,store);}
-
-                drawChartFor(itemName); updateStats(itemName);
-
+            const cb = tr.querySelector('input[type=checkbox]');
+            cb.addEventListener('change', async () => {
+                await updateEntry(e.id, { ignored: cb.checked });
+                await drawChartFor(itemName);
+                await updateStats(itemName);
             });
 
             const noteInput = tr.querySelector('.note-input');
-
-            noteInput.addEventListener('input', ()=>{
-
-                const id = noteInput.dataset.id;
-
+            noteInput.addEventListener('input', async () => {
                 const val = noteInput.value;
-
-                notes[id] = val;
-
-                saveLS(STORAGE_KEY_NOTES, notes);
-
-
-
-                const store = loadLS(STORAGE_KEY_DATA, {});
-
-                const list = store[itemName]?.entries || [];
-
-                const entry = list.find(x => x.id === id);
-
-                if(entry){ entry.note = val; saveLS(STORAGE_KEY_DATA, store); }
-
-
-
-                drawChartFor(itemName);
-
+                await updateEntry(e.id, { note: val });
+                await drawChartFor(itemName);
             });
-			}
-        drawChartFor(itemName); updateStats(itemName);
+        }
+
+        await drawChartFor(itemName);
+        await updateStats(itemName);
+
+        // Restore scroll position after a brief delay to ensure content is rendered
+        setTimeout(() => {
+            panel.scrollTop = scrollTop;
+        }, 10);
     }
 
+    async function updateStats(itemName) {
+        const statsEl = document.getElementById('pfq-ml-stats');
+        const allEntries = await getEntriesByItem(itemName);
+        const selectedCategory = await getSetting('selected_category', 'all');
+        const showOutliers = await getSetting('show_outliers', false);
 
-    function updateStats(itemName){
+        const { filtered, outlierData, categories } = filterEntriesByCategory(allEntries, selectedCategory, showOutliers);
+        const used = filtered.filter(e => !e.ignored);
 
-        const statsEl=document.getElementById('pfq-ml-stats');
+        if(used.length === 0) {
+            statsEl.textContent = 'No usable points for selected category.';
+            return;
+        }
 
-        const data=loadLS(STORAGE_KEY_DATA,{});
+        const min = Math.min(...used.map(e => e.price));
+        const max = Math.max(...used.map(e => e.price));
+        const avg = Math.round(used.reduce((a,b) => a + b.price, 0) / used.length);
 
-        const entries=(data[itemName]?.entries||[]);
+        let categoryInfo = '';
+        switch(selectedCategory) {
+            case 'single': categoryInfo = ` | Single qty only`; break;
+            case 'multiple': categoryInfo = ` | Multiple qty (2-${categories.median})`; break;
+            case 'bulk': categoryInfo = ` | Bulk qty (>${categories.median})`; break;
+            case 'all': categoryInfo = ` | All quantities (median: ${categories.median})`; break;
+        }
 
-        const used=entries.filter(e=>!e.ignored);
+        const outlierInfo = outlierData.outliers.size > 0 ?
+            ` | Outliers: ${outlierData.outliers.size} ${showOutliers ? '(shown)' : '(hidden)'}` : '';
 
-        if(used.length===0){statsEl.textContent='No usable points.';return;}
-
-        const min=Math.min(...used.map(e=>e.price));
-
-        const max=Math.max(...used.map(e=>e.price));
-
-        const avg=Math.round(used.reduce((a,b)=>a+b.price,0)/used.length);
-
-        statsEl.textContent=`Price: min ${fmtNumber(min)} | max ${fmtNumber(max)} | avg ${fmtNumber(avg)} | total entries: ${entries.length}`;
-
+        statsEl.textContent = `Price: min ${fmtNumber(min)} | max ${fmtNumber(max)} | avg ${fmtNumber(avg)} | entries: ${used.length}/${allEntries.length}${categoryInfo}${outlierInfo}`;
     }
 
-
-
-    function drawChartFor(itemName){
-
+    async function drawChartFor(itemName) {
         const canvas = document.getElementById('pfq-ml-canvas');
-
         if(!canvas) return;
 
         const ctx = canvas.getContext('2d');
-
         const dpr = window.devicePixelRatio || 1;
-
         const cssW = canvas.clientWidth || 1180;
-
         const cssH = canvas.clientHeight || 160;
 
-        if(canvas.width!==cssW*dpr || canvas.height!==cssH*dpr){ canvas.width=cssW*dpr; canvas.height=cssH*dpr; }
+        if(canvas.width !== cssW*dpr || canvas.height !== cssH*dpr) {
+            canvas.width = cssW*dpr;
+            canvas.height = cssH*dpr;
+        }
 
-        ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,cssW,cssH);
-
-
+        ctx.setTransform(dpr,0,0,dpr,0,0);
+        ctx.clearRect(0,0,cssW,cssH);
 
         const padding = {left:50, right:10, top:10, bottom:20};
-
         const w = cssW - padding.left - padding.right;
-
         const h = cssH - padding.top - padding.bottom;
 
-        const data = loadLS(STORAGE_KEY_DATA,{});
+        const selectedCategory = await getSetting('selected_category', 'all');
+        const showOutliers = await getSetting('show_outliers', false);
+        const allEntries = await getEntriesByItem(itemName);
+        const { filtered } = filterEntriesByCategory(allEntries, selectedCategory, showOutliers);
+        const entries = filtered.filter(e => !e.ignored);
 
-        const notes=loadLS(STORAGE_KEY_NOTES,{});
+        const today = new Date();
+        const start = new Date(today.getFullYear(), today.getMonth()-6, today.getDate());
 
-        const entries=(data[itemName]?.entries||[]).filter(e=>!e.ignored);
+        const dayBins = {};
+        for(let d = new Date(start); d <= today; d.setDate(d.getDate()+1)) {
+            const key = d.toISOString().split('T')[0];
+            dayBins[key] = [];
+        }
 
-        const today=new Date(); const start=new Date(today.getFullYear(), today.getMonth()-6, today.getDate());
-
-
-
-        const dayBins={};
-
-        for(let d=new Date(start); d<=today; d.setDate(d.getDate()+1)){ const key=d.toISOString().split('T')[0]; dayBins[key]=[]; }
-
-
-
-        entries.forEach(e=>{
-
-            const key=new Date(e.ts).toISOString().split('T')[0];
-
+        entries.forEach(e => {
+            const key = new Date(e.ts).toISOString().split('T')[0];
             if(dayBins[key]) dayBins[key].push(e.price);
-
         });
 
-
-
-        const dailyData=Object.entries(dayBins).map(([date,prices])=>{
-
-            if(prices.length===0) return {date, avg:null, notes:[]};
-
-            const avg=Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);
-
-            const dayNotes = entries.filter(en=>notes[en.id] && new Date(en.ts).toISOString().split('T')[0]===date).map(en=>notes[en.id]);
-
-            return {date, avg, notes:dayNotes};
-
+        const dailyData = Object.entries(dayBins).map(([date, prices]) => {
+            if(prices.length === 0) return {date, avg: null, notes: []};
+            const avg = Math.round(prices.reduce((a,b) => a + b, 0) / prices.length);
+            const dayNotes = entries.filter(en => en.note && new Date(en.ts).toISOString().split('T')[0] === date).map(en => en.note);
+            return {date, avg, notes: dayNotes};
         });
 
+        const validPrices = dailyData.filter(d => d.avg !== null).map(d => d.avg);
+        const minPrice = validPrices.length ? Math.min(...validPrices) : 0;
+        const maxPrice = validPrices.length ? Math.max(...validPrices) : 0;
 
+        if (validPrices.length === 0) {
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No data available for selected category', cssW/2, cssH/2);
+            return;
+        }
 
-        const validPrices=dailyData.filter(d=>d.avg!==null).map(d=>d.avg);
-
-        const minPrice=validPrices.length?Math.min(...validPrices):0;
-
-        const maxPrice=validPrices.length?Math.max(...validPrices):0;
-
-
-
-        ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1;
-
+        // Draw axes
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = 1;
         ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(padding.left, padding.top+h);
+        ctx.lineTo(padding.left+w, padding.top+h);
+        ctx.stroke();
 
-        ctx.moveTo(padding.left,padding.top); ctx.lineTo(padding.left,padding.top+h); ctx.lineTo(padding.left+w,padding.top+h); ctx.stroke();
+        const xt = i => padding.left + (i/(dailyData.length-1))*w;
+        const yt = price => padding.top+h - ((price-minPrice)/(maxPrice-minPrice))*h;
 
+        // Draw line
+        ctx.strokeStyle = 'rgba(100,200,255,0.9)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        dailyData.forEach((d,i) => {
+            if(d.avg === null) return;
+            const x = xt(i), y = yt(d.avg);
+            if(!ctx._started) {
+                ctx.moveTo(x,y);
+                ctx._started = true;
+            } else {
+                ctx.lineTo(x,y);
+            }
+        });
+        ctx.stroke();
+        ctx._started = false;
 
-
-        const xt=i=>padding.left + (i/(dailyData.length-1))*w;
-
-        const yt=price=>padding.top+h - ((price-minPrice)/(maxPrice-minPrice))*h;
-
-
-
-        ctx.strokeStyle='rgba(100,200,255,0.9)'; ctx.lineWidth=2; ctx.beginPath();
-
-        dailyData.forEach((d,i)=>{ if(d.avg===null) return; const x=xt(i),y=yt(d.avg); if(!ctx._started){ctx.moveTo(x,y);ctx._started=true;} else ctx.lineTo(x,y); });
-
-        ctx.stroke(); ctx._started=false;
-
-
-
-        const points=[];
-
-        dailyData.forEach((d,i)=>{
-
-            if(d.avg===null) return;
-
-            const x=xt(i),y=yt(d.avg);
-
-            ctx.beginPath(); ctx.arc(x,y,3,0,2*Math.PI);
-
-            ctx.fillStyle=d.notes.length?'red':'white';
-
+        // Draw points and setup tooltip
+        const points = [];
+        dailyData.forEach((d,i) => {
+            if(d.avg === null) return;
+            const x = xt(i), y = yt(d.avg);
+            ctx.beginPath();
+            ctx.arc(x,y,3,0,2*Math.PI);
+            ctx.fillStyle = d.notes.length ? 'red' : 'white';
             ctx.fill();
-
             points.push({x,y,data:d});
-
         });
 
-
-
-        let tip=document.getElementById('pfq-ml-tooltip');
-
-        if(!tip){ tip=document.createElement('div'); tip.id='pfq-ml-tooltip'; Object.assign(tip.style,{position:'fixed',background:'rgba(0,0,0,0.85)',color:'white',padding:'4px 6px',borderRadius:'4px',fontSize:'12px',pointerEvents:'none',zIndex:'200',display:'none'}); document.body.appendChild(tip);}
-
-        canvas.onmousemove=e=>{
-
-            const rect=canvas.getBoundingClientRect(); const mx=e.clientX-rect.left, my=e.clientY-rect.top;
-
-            const hit=points.find(p=>Math.hypot(p.x-mx,p.y-my)<=6);
-
-            if(hit){
-
-                tip.innerHTML=`${hit.data.date}<br>${fmtNumber(hit.data.avg)}` + (hit.data.notes.length?'<br>Notes: '+hit.data.notes.join('; ') :'');
-
-                tip.style.left=(e.clientX+8)+'px'; tip.style.top=(e.clientY+8)+'px'; tip.style.display='block';
-
-            }else tip.style.display='none';
-
-        };
-
-        canvas.onmouseleave=()=>{tip.style.display='none';};
-
-    }
-
-
-
-    function exportCSV(){
-
-        const data=loadLS(STORAGE_KEY_DATA,{});
-
-        const csv=['Item,SoldDate,User,Price,Qty,Ignored,Note'];
-
-
-
-        Object.entries(data).forEach(([item, obj])=>{
-
-            (obj.entries||[]).forEach(e=>{
-
-                csv.push([
-
-                    item,
-
-                    e.dateStr,
-
-                    e.user,
-
-                    e.price,
-
-                    e.qty,
-
-                    e.ignored,
-
-                    e.note||''
-
-                ].map(v=>`"${v}"`).join(','));
-
+        // Tooltip handling
+        let tip = document.getElementById('pfq-ml-tooltip');
+        if(!tip) {
+            tip = document.createElement('div');
+            tip.id = 'pfq-ml-tooltip';
+            Object.assign(tip.style, {
+                position:'fixed',background:'rgba(0,0,0,0.85)',color:'white',padding:'4px 6px',
+                borderRadius:'4px',fontSize:'12px',pointerEvents:'none',zIndex:'200',display:'none'
             });
+            document.body.appendChild(tip);
+        }
 
-        });
-
-
-
-        const blob=new Blob([csv.join('\n')],{type:'text/csv'});
-
-        const url=URL.createObjectURL(blob);
-
-        const a=document.createElement('a');
-
-        a.href=url; a.download='pfq_market_data.csv';
-
-        a.click();
-
-        URL.revokeObjectURL(url);
-
+        canvas.onmousemove = e => {
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            const hit = points.find(p => Math.hypot(p.x - mx, p.y - my) <= 6);
+            if(hit) {
+                tip.innerHTML = `${hit.data.date}<br>${fmtNumber(hit.data.avg)}` +
+                    (hit.data.notes.length ? '<br>Notes: ' + hit.data.notes.join('; ') : '');
+                tip.style.left = (e.clientX + 8) + 'px';
+                tip.style.top = (e.clientY + 8) + 'px';
+                tip.style.display = 'block';
+            } else {
+                tip.style.display = 'none';
+            }
+        };
+        canvas.onmouseleave = () => { tip.style.display = 'none'; };
     }
 
+    async function exportCSV() {
+        const allEntries = await getAllEntries();
+        const csv = ['Item,SoldDate,User,Price,Qty,Ignored,Note'];
 
+        allEntries.forEach(e => {
+            csv.push([
+                e.itemName,
+                e.dateStr,
+                e.user,
+                e.price,
+                e.qty,
+                e.ignored,
+                e.note || ''
+            ].map(v => `"${v}"`).join(','));
+        });
 
-    function uploadCSV(){
+        const blob = new Blob([csv.join('\n')], {type: 'text/csv'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'pfq_market_data.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
 
-        const data=loadLS(STORAGE_KEY_DATA,{});
+    async function uploadCSV() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.csv';
 
-        const notes=loadLS(STORAGE_KEY_NOTES,{});
+        input.onchange = () => {
+            const file = input.files[0];
+            if(!file) return;
 
-        const ignored=loadLS(STORAGE_KEY_IGNORED,{});
+            const reader = new FileReader();
+            reader.onload = async e => {
+                const lines = e.target.result.split(/\r?\n/).slice(1);
 
-
-
-        const input=document.createElement('input');
-
-        input.type='file'; input.accept='.csv';
-
-        input.onchange=()=>{
-
-            const file=input.files[0]; if(!file) return;
-
-            const reader=new FileReader();
-
-            reader.onload=e=>{
-
-                const lines=e.target.result.split(/\r?\n/).slice(1);
-
-                for(const line of lines){
-
+                for(const line of lines) {
                     if(!line.trim()) continue;
+                    const row = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(s => s.replace(/^"|"$/g,''));
+                    if(row.length < 7) continue;
 
-                    const row=line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(s=>s.replace(/^"|"$/g,''));
+                    const [itemName, dateStr, user, price, qty, ign, note] = row;
+                    const id = stableId(itemName, dateStr, user, price, qty);
 
-                    if(row.length<7) continue;
+                    // Check if entry already exists
+                    const existing = await getEntriesByItem(itemName);
+                    if(existing.find(x => x.id === id)) continue;
 
-                    const [item,dateStr,user,price,qty,ign,note]=row;
-
-                    if(!data[item]) data[item]={entries:[]};
-
-                    const id=stableId(item,dateStr,user,price,qty);
-
-                    if(data[item].entries.find(x=>x.id===id)) continue;
-
-                    data[item].entries.push({
-
+                    const entry = {
                         id,
-
-                        ts:parseSoldDateToTS(dateStr)||Date.now(),
-
+                        itemName,
+                        ts: parseSoldDateToTS(dateStr) || Date.now(),
                         dateStr,
-
                         user,
+                        price: parseInt(price) || 0,
+                        qty: parseInt(qty) || 0,
+                        ignored: ign === 'true',
+                        note: note || ''
+                    };
 
-                        price:parseInt(price)||0,
-
-                        qty:parseInt(qty)||0,
-
-                        ignored:ign==='true',
-
-                        note:note||''
-
-                    });
-
-                    if(note) notes[id]=note;
-
-                    if(ign==='true') ignored[id]=true;
-
+                    await saveEntry(entry);
                 }
 
-                saveLS(STORAGE_KEY_DATA,data);
-
-                saveLS(STORAGE_KEY_NOTES,notes);
-
-                saveLS(STORAGE_KEY_IGNORED,ignored);
-
-                renderPanel();
-
+                await renderPanel();
             };
-
             reader.readAsText(file);
-
         };
-
         input.click();
-
     }
 
-    function runOnce(){ scrapeOnce(); renderPanel(); }
+    async function clearAllData() {
+        if(!confirm('Are you sure you want to clear all market data? This cannot be undone.')) return;
 
-    createPanel();
-    setInterval(runOnce,RUN_INTERVAL_MS);
+        if(!db) await initDB();
+        const tx = db.transaction(['entries', 'settings'], 'readwrite');
+
+        await Promise.all([
+            tx.objectStore('entries').clear(),
+            tx.objectStore('settings').clear()
+        ]);
+
+        await renderPanel();
+    }
+
+    async function runOnce() {
+        await scrapeOnce();
+        await renderPanel();
+    }
+
+    // Initialize the application
+    async function init() {
+        await initDB();
+        createPanel();
+        setInterval(runOnce, RUN_INTERVAL_MS);
+    }
+
+    init().catch(console.error);
 })();
