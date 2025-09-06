@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         PFQ Market Logger Enhanced
-// @version      2.1
+// @version      2.2
 // @description  Logs sold prices for items viewed in the market with quantity categories and outlier detection
 // @match        https://pokefarm.com/marketboard*
 // @grant        none
