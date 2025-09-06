@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         PFQ Market Logger Enhanced
-// @version      2.2
+// @version      2.3
 // @description  Logs sold prices for items viewed in the market with quantity categories and outlier detection
 // @match        https://pokefarm.com/marketboard*
 // @grant        none
@@ -197,7 +197,7 @@
 
     // Utility functions
     function stableId(itemName, dateStr, user, price, qty) {
-        return `${itemName}||${dateStr}||${user}||${price}||${qty}`;
+        return `${itemName}||${dateStr}||${price}||${qty}`;
     }
 
     function toNumber(txt) {
@@ -403,6 +403,28 @@
         });
     }
 
+    async function updateAllScannedDisplays() {
+        const scannedMap = await getSetting('scanned_times', {});
+        const nameSpans = document.querySelectorAll('.inventory > div > ul > li > span > .name');
+        nameSpans.forEach(ns => {
+            const itemName = ns.textContent.trim();
+            const ts = scannedMap[itemName];
+            if(ts) {
+                const elapsed = fmtElapsed(ts);
+                let sub = ns.parentElement.querySelector('.pfq-scanned-time');
+                if(!sub) {
+                    sub = document.createElement('div');
+                    sub.className = 'pfq-scanned-time';
+                    sub.style.fontSize = '10pt';
+                    sub.style.color = 'var(--col-link2)';
+                    sub.style.marginTop = '2px';
+                    ns.appendChild(sub);
+                }
+                sub.textContent = `Scanned: ${elapsed}`;
+            }
+        });
+    }
+
     async function scrapeOnce() {
         const visibleLists = getVisibleSellerLists();
         const scannedMap = await getSetting('scanned_times', {});
@@ -519,7 +541,7 @@
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${formatDisplayDate(e.ts)}</td>
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${escapeHTML(e.user)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${fmtNumber(e.price)}</td>
-                <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${e.qty}</td>
+                <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">x${e.qty}</td>
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); font-size:12px;">${categoryLabel}</td>
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); width:200px;">
                     <input type="text" class="note-input" data-id="${e.id}" value="${escapeHTML(e.note||'')}"
@@ -573,9 +595,9 @@
         let categoryInfo = '';
         switch(selectedCategory) {
             case 'single': categoryInfo = ` | Single qty only`; break;
-            case 'multiple': categoryInfo = ` | Multiple qty (2-${categories.median})`; break;
-            case 'bulk': categoryInfo = ` | Bulk qty (>${categories.median})`; break;
-            case 'all': categoryInfo = ` | All quantities (median: ${categories.median})`; break;
+            case 'multiple': categoryInfo = ` | Multiple qty (x2-x${categories.median})`; break;
+            case 'bulk': categoryInfo = ` | Bulk qty (>x${categories.median})`; break;
+            case 'all': categoryInfo = ` | All quantities (median: x${categories.median})`; break;
         }
 
         const outlierInfo = outlierData.outliers.size > 0 ?
@@ -653,164 +675,4 @@
         ctx.lineTo(padding.left+w, padding.top+h);
         ctx.stroke();
 
-        const xt = i => padding.left + (i/(dailyData.length-1))*w;
-        const yt = price => padding.top+h - ((price-minPrice)/(maxPrice-minPrice))*h;
-
-        // Draw line
-        ctx.strokeStyle = 'rgba(100,200,255,0.9)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        dailyData.forEach((d,i) => {
-            if(d.avg === null) return;
-            const x = xt(i), y = yt(d.avg);
-            if(!ctx._started) {
-                ctx.moveTo(x,y);
-                ctx._started = true;
-            } else {
-                ctx.lineTo(x,y);
-            }
-        });
-        ctx.stroke();
-        ctx._started = false;
-
-        // Draw points and setup tooltip
-        const points = [];
-        dailyData.forEach((d,i) => {
-            if(d.avg === null) return;
-            const x = xt(i), y = yt(d.avg);
-            ctx.beginPath();
-            ctx.arc(x,y,3,0,2*Math.PI);
-            ctx.fillStyle = d.notes.length ? 'red' : 'white';
-            ctx.fill();
-            points.push({x,y,data:d});
-        });
-
-        // Tooltip handling
-        let tip = document.getElementById('pfq-ml-tooltip');
-        if(!tip) {
-            tip = document.createElement('div');
-            tip.id = 'pfq-ml-tooltip';
-            Object.assign(tip.style, {
-                position:'fixed',background:'rgba(0,0,0,0.85)',color:'white',padding:'4px 6px',
-                borderRadius:'4px',fontSize:'12px',pointerEvents:'none',zIndex:'200',display:'none'
-            });
-            document.body.appendChild(tip);
-        }
-
-        canvas.onmousemove = e => {
-            const rect = canvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-            const hit = points.find(p => Math.hypot(p.x - mx, p.y - my) <= 6);
-            if(hit) {
-                tip.innerHTML = `${hit.data.date}<br>${fmtNumber(hit.data.avg)}` +
-                    (hit.data.notes.length ? '<br>Notes: ' + hit.data.notes.join('; ') : '');
-                tip.style.left = (e.clientX + 8) + 'px';
-                tip.style.top = (e.clientY + 8) + 'px';
-                tip.style.display = 'block';
-            } else {
-                tip.style.display = 'none';
-            }
-        };
-        canvas.onmouseleave = () => { tip.style.display = 'none'; };
-    }
-
-    async function exportCSV() {
-        const allEntries = await getAllEntries();
-        const csv = ['Item,SoldDate,User,Price,Qty,Ignored,Note'];
-
-        allEntries.forEach(e => {
-            csv.push([
-                e.itemName,
-                e.dateStr,
-                e.user,
-                e.price,
-                e.qty,
-                e.ignored,
-                e.note || ''
-            ].map(v => `"${v}"`).join(','));
-        });
-
-        const blob = new Blob([csv.join('\n')], {type: 'text/csv'});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'pfq_market_data.csv';
-        a.click();
-        URL.revokeObjectURL(url);
-    }
-
-    async function uploadCSV() {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.csv';
-
-        input.onchange = () => {
-            const file = input.files[0];
-            if(!file) return;
-
-            const reader = new FileReader();
-            reader.onload = async e => {
-                const lines = e.target.result.split(/\r?\n/).slice(1);
-
-                for(const line of lines) {
-                    if(!line.trim()) continue;
-                    const row = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(s => s.replace(/^"|"$/g,''));
-                    if(row.length < 7) continue;
-
-                    const [itemName, dateStr, user, price, qty, ign, note] = row;
-                    const id = stableId(itemName, dateStr, user, price, qty);
-
-                    // Check if entry already exists
-                    const existing = await getEntriesByItem(itemName);
-                    if(existing.find(x => x.id === id)) continue;
-
-                    const entry = {
-                        id,
-                        itemName,
-                        ts: parseSoldDateToTS(dateStr) || Date.now(),
-                        dateStr,
-                        user,
-                        price: parseInt(price) || 0,
-                        qty: parseInt(qty) || 0,
-                        ignored: ign === 'true',
-                        note: note || ''
-                    };
-
-                    await saveEntry(entry);
-                }
-
-                await renderPanel();
-            };
-            reader.readAsText(file);
-        };
-        input.click();
-    }
-
-    async function clearAllData() {
-        if(!confirm('Are you sure you want to clear all market data? This cannot be undone.')) return;
-
-        if(!db) await initDB();
-        const tx = db.transaction(['entries', 'settings'], 'readwrite');
-
-        await Promise.all([
-            tx.objectStore('entries').clear(),
-            tx.objectStore('settings').clear()
-        ]);
-
-        await renderPanel();
-    }
-
-    async function runOnce() {
-        await scrapeOnce();
-        await renderPanel();
-    }
-
-    // Initialize the application
-    async function init() {
-        await initDB();
-        createPanel();
-        setInterval(runOnce, RUN_INTERVAL_MS);
-    }
-
-    init().catch(console.error);
-})();
+        const xt = i => padding.left + (i/(
