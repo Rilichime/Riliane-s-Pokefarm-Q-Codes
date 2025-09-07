@@ -274,7 +274,6 @@
                     <th>User</th>
                     <th>Price</th>
                     <th>Qty</th>
-                    <th>Category</th>
                     <th>Notes</th>
                     <th>Last Scan</th>
                 </tr>
@@ -546,8 +545,6 @@
         filtered.sort((a,b) => b.ts - a.ts);
 
         for(const e of filtered) {
-            const categoryLabel = getCategoryLabel(e, categories.median);
-
             const tr = document.createElement('tr');
 
             tr.innerHTML = `
@@ -558,7 +555,6 @@
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${escapeHTML(e.user)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${fmtNumber(e.price)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${e.qty}</td>
-                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); font-size:12px;">${categoryLabel}</td>
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); width:200px;">
                     <input type="text" class="note-input" data-id="${e.id}" value="${escapeHTML(e.note||'')}"
                            style="width:100%;background:rgba(255,255,255,0.1);color:white;border:none;padding:2px;" />
