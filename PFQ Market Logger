@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         PFQ Market Logger Enhanced
-// @version      2.4
+// @version      2.5
 // @description  Logs sold prices for items viewed in the market.
 // @match        https://pokefarm.com/marketboard*
 // @grant        none
@@ -311,6 +311,7 @@
     async function updateAllScannedDisplays() {
         const scannedMap = await getSetting('scanned_times', {});
         const nameSpans = document.querySelectorAll('.inventory > div > ul > li > span > .name');
+
         nameSpans.forEach(ns => {
             const itemName = ns.textContent.trim();
             const ts = scannedMap[itemName];
@@ -328,6 +329,70 @@
                 sub.textContent = `Scanned: ${elapsed}`;
             }
         });
+
+        console.log(`Updated scanned displays for ${nameSpans.length} items`);
+    }
+
+    // New function to retry updating scanned displays with exponential backoff
+    async function updateScannedDisplaysWithRetry(maxRetries = 5) {
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const nameSpans = document.querySelectorAll('.inventory > div > ul > li > span > .name');
+
+                if (nameSpans.length > 0) {
+                    await updateAllScannedDisplays();
+                    console.log(`Successfully updated scanned displays on attempt ${attempt + 1}`);
+                    return;
+                } else {
+                    console.log(`Attempt ${attempt + 1}: No inventory elements found, retrying...`);
+                }
+            } catch (error) {
+                console.log(`Attempt ${attempt + 1} failed:`, error);
+            }
+
+            // Wait with exponential backoff: 500ms, 1s, 2s, 4s, 8s
+            const delay = 500 * Math.pow(2, attempt);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+
+        console.log('Failed to update scanned displays after all retries');
+    }
+
+    // Watch for DOM changes to update scanned displays when inventory loads
+    function observeInventoryChanges() {
+        const observer = new MutationObserver((mutations) => {
+            let shouldUpdate = false;
+
+            mutations.forEach((mutation) => {
+                // Check if any new nodes contain inventory items
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const hasInventory = node.querySelector && node.querySelector('.inventory .name');
+                        const isInventoryElement = node.classList && node.classList.contains('name');
+
+                        if (hasInventory || isInventoryElement) {
+                            shouldUpdate = true;
+                        }
+                    }
+                });
+            });
+
+            if (shouldUpdate) {
+                // Debounce the update to avoid excessive calls
+                clearTimeout(observer.updateTimeout);
+                observer.updateTimeout = setTimeout(async () => {
+                    await updateAllScannedDisplays();
+                }, 1000);
+            }
+        });
+
+        // Observe the entire document for changes
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        return observer;
     }
 
     async function scrapeOnce() {
@@ -388,6 +453,9 @@
             await setSetting('last_item', firstDetectedItem);
             await updateScannedDisplay(firstDetectedItem);
         }
+
+        // Update all scanned displays after scanning
+        await updateAllScannedDisplays();
 
         return firstDetectedItem;
     }
@@ -592,10 +660,20 @@
         await initDB();
         createPanel();
         await renderPanel();
-        await updateAllScannedDisplays();
+
+        // Set up DOM observer for dynamic updates
+        observeInventoryChanges();
+
+        // Try to update scanned displays with retry logic
+        await updateScannedDisplaysWithRetry();
 
         setInterval(runOnce, RUN_INTERVAL_MS);
     }
 
-    main();
+    // Wait for DOM to be ready before running
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', main);
+    } else {
+        main();
+    }
 })();
