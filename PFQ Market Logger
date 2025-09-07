@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         PFQ Market Logger Enhanced
-// @version      2.5
+// @version      3.0
 // @description  Logs sold prices for items viewed in the market.
 // @match        https://pokefarm.com/marketboard*
 // @grant        none
@@ -122,6 +122,46 @@
         });
     }
 
+    // Category filtering functions
+    function categorizeByQuantity(entries) {
+        if (entries.length === 0) return { single: [], multiple: [], bulk: [], median: 0 };
+
+        const quantities = entries.map(e => e.qty).sort((a, b) => a - b);
+        const median = quantities[Math.floor(quantities.length / 2)];
+
+        const categories = {
+            single: entries.filter(e => e.qty === 1),
+            multiple: entries.filter(e => e.qty > 1 && e.qty <= median),
+            bulk: entries.filter(e => e.qty > median),
+            median
+        };
+
+        return categories;
+    }
+
+    function filterEntriesByCategory(entries, category) {
+        const categories = categorizeByQuantity(entries);
+
+        let filtered = [];
+        switch (category) {
+            case 'single':
+                filtered = categories.single;
+                break;
+            case 'multiple':
+                filtered = categories.multiple;
+                break;
+            case 'bulk':
+                filtered = categories.bulk;
+                break;
+            case 'all':
+            default:
+                filtered = entries;
+                break;
+        }
+
+        return { filtered, categories };
+    }
+
     // Utility functions
     function stableId(itemName, dateStr, user, price, qty) {
         return `${itemName}||${dateStr}||${price}||${qty}`;
@@ -209,6 +249,15 @@
         panel.innerHTML = `
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
             <strong id="pfq-ml-item-name" style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Item: (detecting...)</strong>
+            <label style="display:flex; align-items:center; gap:4px;">
+                Category:
+                <select id="pfq-ml-category" style="padding:4px; background:rgba(0,0,0,0.8); color:white; border:1px solid rgba(255,255,255,0.5); border-radius:3px;">
+                    <option value="all" style="background:rgba(0,0,0,0.9); color:white;">All</option>
+                    <option value="single" style="background:rgba(0,0,0,0.9); color:white;">Single</option>
+                    <option value="multiple" style="background:rgba(0,0,0,0.9); color:white;">Multiple</option>
+                    <option value="bulk" style="background:rgba(0,0,0,0.9); color:white;">Bulk</option>
+                </select>
+            </label>
             <button id="pfq-ml-run" style="cursor:pointer;">Run now</button>
             <button id="pfq-ml-export" style="cursor:pointer;">Export CSV</button>
             <button id="pfq-ml-upload" style="cursor:pointer;">Upload CSV</button>
@@ -225,6 +274,7 @@
                     <th>User</th>
                     <th>Price</th>
                     <th>Qty</th>
+                    <th>Category</th>
                     <th>Notes</th>
                     <th>Last Scan</th>
                 </tr>
@@ -260,12 +310,23 @@
         panel.querySelector('#pfq-ml-upload').addEventListener('click', uploadCSV);
         panel.querySelector('#pfq-ml-clear').addEventListener('click', clearAllData);
 
+        // Category filter listener
+        panel.querySelector('#pfq-ml-category').addEventListener('change', async (e) => {
+            await setSetting('selected_category', e.target.value);
+            await renderPanel();
+        });
+
         // Initialize UI state
         getSetting('ui_hidden', false).then(hidden => {
             if(hidden) {
                 panel.style.display = 'none';
                 showBtn.style.display = '';
             }
+        });
+
+        // Initialize filter settings
+        getSetting('selected_category', 'all').then(category => {
+            panel.querySelector('#pfq-ml-category').value = category;
         });
 
         return panel;
@@ -472,6 +533,8 @@
             await setSetting('last_item', itemName);
         }
 
+        const selectedCategory = await getSetting('selected_category', 'all');
+
         panel.querySelector('#pfq-ml-item-name').textContent = `Item: ${itemName}`;
         await updateScannedDisplay(itemName);
 
@@ -479,9 +542,12 @@
         tbody.innerHTML = '';
 
         const allEntries = await getEntriesByItem(itemName);
-        allEntries.sort((a,b) => b.ts - a.ts);
+        const { filtered, categories } = filterEntriesByCategory(allEntries, selectedCategory);
+        filtered.sort((a,b) => b.ts - a.ts);
 
-        for(const e of allEntries) {
+        for(const e of filtered) {
+            const categoryLabel = getCategoryLabel(e, categories.median);
+
             const tr = document.createElement('tr');
 
             tr.innerHTML = `
@@ -492,6 +558,7 @@
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1);">${escapeHTML(e.user)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${fmtNumber(e.price)}</td>
                 <td style="padding:4px; text-align:right; border-bottom:1px solid rgba(255,255,255,0.1);">${e.qty}</td>
+                <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); font-size:12px;">${categoryLabel}</td>
                 <td style="padding:4px; border-bottom:1px solid rgba(255,255,255,0.1); width:200px;">
                     <input type="text" class="note-input" data-id="${e.id}" value="${escapeHTML(e.note||'')}"
                            style="width:100%;background:rgba(255,255,255,0.1);color:white;border:none;padding:2px;" />
@@ -519,7 +586,7 @@
         });
 
         // Stats
-        const validEntries = allEntries.filter(e => !e.ignored);
+        const validEntries = filtered.filter(e => !e.ignored);
         const prices = validEntries.map(e => e.price);
         const avg = prices.reduce((a,b)=>a+b,0)/ (prices.length||1);
         const median = (() => {
@@ -528,9 +595,18 @@
             const mid = Math.floor(sorted.length/2);
             return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;
         })();
+
+        let categoryInfo = '';
+        switch(selectedCategory) {
+            case 'single': categoryInfo = ` | Single qty only`; break;
+            case 'multiple': categoryInfo = ` | Multiple qty (x2-x${categories.median})`; break;
+            case 'bulk': categoryInfo = ` | Bulk qty (>x${categories.median})`; break;
+            case 'all': categoryInfo = ` | All quantities (median: x${categories.median})`; break;
+        }
+
         const statsDiv = panel.querySelector('#pfq-ml-stats');
         statsDiv.innerHTML = `
-            <div><strong>Stats:</strong> ${validEntries.length} records | Avg: ${fmtNumber(Math.round(avg))} | Median: ${fmtNumber(Math.round(median))}</div>
+            <div><strong>Stats:</strong> ${validEntries.length} records | Avg: ${fmtNumber(Math.round(avg))} | Median: ${fmtNumber(Math.round(median))}${categoryInfo}</div>
         `;
 
         // Draw chart
